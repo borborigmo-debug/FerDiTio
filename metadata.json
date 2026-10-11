@@ -1,0 +1,6 @@
+{
+  "name": "Fernanditio",
+  "description": "Aplicación docente para la evaluación competencial y por criterios de Lengua Castellana y Literatura en ESO y Bachillerato.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
