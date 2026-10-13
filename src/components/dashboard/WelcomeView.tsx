@@ -501,7 +501,7 @@ export const WelcomeView: React.FC = () => {
                   Grupos del Docente y Lectura del Cuaderno
                 </h2>
                 <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
-                  Fase 2: Solo Lectura
+                  Fase 3: Rúbricas y Cuaderno
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 max-w-2xl leading-relaxed">
@@ -601,13 +601,16 @@ export const WelcomeView: React.FC = () => {
         </div>
       )}
 
-      {/* Vista Completa del Cuaderno del Grupo Seleccionado (Fase 2) */}
+      {/* Vista Completa del Cuaderno del Grupo Seleccionado (Fase 4: Rúbricas y Evaluación) */}
       {cuadernoData && !isLoadingCuaderno && (
         <ErrorBoundary
           fallbackTitle="Error al visualizar el cuaderno del grupo"
           onReset={() => setCuadernoData(null)}
         >
-          <CuadernoView data={cuadernoData} />
+          <CuadernoView
+            data={cuadernoData}
+            onUpdateCuadernoData={(updatedData) => setCuadernoData(updatedData)}
+          />
         </ErrorBoundary>
       )}
 

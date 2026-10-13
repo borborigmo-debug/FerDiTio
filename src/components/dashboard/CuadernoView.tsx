@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { CuadernoGrupoData } from '../../types';
+import { CuadernoGrupoData, Calificacion } from '../../types';
 import {
   Users,
   Target,
@@ -17,16 +17,26 @@ import {
   Hash,
   Eye,
   Info,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react';
+import { RubricasView } from '../rubricas/RubricasView';
+import {
+  compararRespaldoConRemoto,
+  limpiarRespaldoCalificaciones,
+  DiagnosticoRespaldo,
+} from '../../services/calificacionesService';
 
 interface CuadernoViewProps {
   data: CuadernoGrupoData;
+  onUpdateCuadernoData?: (newData: CuadernoGrupoData) => void;
 }
 
 type TabKey = 'resumen' | 'alumnos' | 'criterios' | 'actividades' | 'secciones' | 'rubricas' | 'calificaciones';
 
-export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
+export const CuadernoView: React.FC<CuadernoViewProps> = ({ data, onUpdateCuadernoData }) => {
   const [activeTab, setActiveTab] = useState<TabKey>('resumen');
+  const [selectedRubricaId, setSelectedRubricaId] = useState<string | null>(null);
 
   const grupo = data?.grupo;
   const alumnos = Array.isArray(data?.alumnos) ? data.alumnos : [];
@@ -34,7 +44,61 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
   const actividades = Array.isArray(data?.actividades) ? data.actividades : [];
   const secciones = Array.isArray(data?.secciones) ? data.secciones : [];
   const rubricas = Array.isArray(data?.rubricas) ? data.rubricas : [];
-  const calificaciones = Array.isArray(data?.calificaciones) ? data.calificaciones : [];
+
+  // Calificaciones reactivas en tiempo real
+  const [calificaciones, setCalificaciones] = useState<Calificacion[]>(
+    Array.isArray(data?.calificaciones) ? data.calificaciones : []
+  );
+
+  // Diagnóstico seguro de respaldo local pendiente
+  const [diagnosticoRespaldo, setDiagnosticoRespaldo] = useState<DiagnosticoRespaldo | null>(null);
+  const [mostrarDetallesRespaldo, setMostrarDetallesRespaldo] = useState<boolean>(false);
+
+  // Comprobar el respaldo local una vez al cargar el grupo o cuando cambian las calificaciones remotas
+  React.useEffect(() => {
+    if (grupo?.id && Array.isArray(data?.calificaciones)) {
+      const diag = compararRespaldoConRemoto(grupo.id, data.calificaciones);
+      setDiagnosticoRespaldo(diag.hayDiferencias ? diag : null);
+    }
+  }, [grupo?.id, data?.calificaciones]);
+
+  const handleUpdateCalificaciones = (nuevasCalifs: Calificacion[]) => {
+    setCalificaciones(nuevasCalifs);
+    if (grupo?.id) {
+      const diag = compararRespaldoConRemoto(grupo.id, nuevasCalifs);
+      setDiagnosticoRespaldo(diag.hayDiferencias ? diag : null);
+    }
+    if (onUpdateCuadernoData && data) {
+      onUpdateCuadernoData({
+        ...data,
+        calificaciones: nuevasCalifs,
+        estadisticas: {
+          ...data.estadisticas,
+          totalCalificaciones: nuevasCalifs.length,
+        },
+      });
+    }
+  };
+
+  const handleCargarBorradorLocal = () => {
+    if (!diagnosticoRespaldo || !diagnosticoRespaldo.calificacionesLocales) return;
+    handleUpdateCalificaciones(diagnosticoRespaldo.calificacionesLocales);
+    setActiveTab('calificaciones');
+    window.alert(
+      "Se ha cargado el borrador local en la vista activa. Ahora puedes revisar las calificaciones en pantalla y pulsar 'Guardar Calificación' desde el evaluador de rúbricas para persistirlas en Supabase."
+    );
+  };
+
+  const handleDescartarRespaldoLocal = () => {
+    if (!grupo?.id) return;
+    const confirmacion = window.confirm(
+      "¿Estás seguro de que deseas descartar el respaldo local guardado en este navegador? Se conservarán exclusivamente los datos oficiales de Supabase."
+    );
+    if (!confirmacion) return;
+    limpiarRespaldoCalificaciones(grupo.id);
+    setDiagnosticoRespaldo(null);
+    setMostrarDetallesRespaldo(false);
+  };
   const estadisticas = data?.estadisticas ?? {
     totalAlumnos: alumnos.length,
     totalCriterios: criterios.length,
@@ -98,7 +162,7 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
 
           <div className="inline-flex items-center gap-2 bg-slate-800/80 px-3 py-1.5 rounded-lg border border-slate-700 text-xs text-slate-300 self-start md:self-auto">
             <Info className="w-4 h-4 text-indigo-400 shrink-0" aria-hidden="true" />
-            <span>Fase 2: Modo estricto de solo lectura</span>
+            <span>Fase 4: Evaluación de Rúbricas</span>
           </div>
         </div>
 
@@ -141,6 +205,94 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
           </div>
         </div>
       </div>
+
+      {/* Aviso de Calificaciones Locales Pendientes de Sincronización */}
+      {diagnosticoRespaldo && diagnosticoRespaldo.hayDiferencias && (
+        <div className="bg-amber-50 border-b border-amber-200 p-4 sm:p-5 text-xs text-amber-950 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-sm text-amber-900">
+                  Calificaciones locales sin sincronizar detectadas ({diagnosticoRespaldo.totalDiferencias})
+                </p>
+                <p className="text-amber-800 mt-0.5 leading-relaxed">
+                  Existen {diagnosticoRespaldo.totalDiferencias} calificación(es) guardadas en este dispositivo que difieren de Supabase (posiblemente de una sesión previa interrumpida o sin conexión). Por seguridad, no se han sobrescrito los datos remotos automáticamente.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
+              <button
+                type="button"
+                onClick={() => setMostrarDetallesRespaldo(!mostrarDetallesRespaldo)}
+                className="px-3 py-1.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100 font-semibold text-amber-900 transition-colors shadow-2xs cursor-pointer"
+              >
+                {mostrarDetallesRespaldo ? 'Ocultar diferencias' : `Ver diferencias (${diagnosticoRespaldo.totalDiferencias})`}
+              </button>
+              <button
+                type="button"
+                onClick={handleCargarBorradorLocal}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors shadow-2xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Cargar borrador en vista</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDescartarRespaldoLocal}
+                className="px-3 py-1.5 rounded-lg border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 font-semibold transition-colors shadow-2xs flex items-center gap-1 cursor-pointer"
+                title="Descartar respaldo local y mantener datos remotos"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Descartar respaldo</span>
+              </button>
+            </div>
+          </div>
+
+          {mostrarDetallesRespaldo && (
+            <div className="mt-3 border border-amber-200 rounded-lg overflow-hidden bg-white max-h-60 overflow-y-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-amber-100/60 font-bold text-amber-950 uppercase text-[10px]">
+                  <tr>
+                    <th className="py-2 px-3">Alumno</th>
+                    <th className="py-2 px-3">Actividad</th>
+                    <th className="py-2 px-3 text-center">Nota en Supabase</th>
+                    <th className="py-2 px-3 text-center">Nota en Respaldo Local</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-amber-100">
+                  {diagnosticoRespaldo.diferencias.map((dif, idx) => {
+                    const alNombre = alumnosMap.get(dif.alumnoId)?.nombre || dif.alumnoId;
+                    const actNombre = actividadesMap.get(dif.actividadId)?.nombre || dif.actividadId;
+                    return (
+                      <tr key={idx} className="hover:bg-amber-50/50">
+                        <td className="py-2 px-3 font-medium text-slate-800">{alNombre}</td>
+                        <td className="py-2 px-3 text-slate-600">{actNombre}</td>
+                        <td className="py-2 px-3 text-center font-mono">
+                          {dif.notaRemota !== null ? (
+                            <span className="font-bold text-slate-700">{dif.notaRemota}</span>
+                          ) : (
+                            <span className="text-slate-400 italic">Pendiente (null)</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-center font-mono font-bold">
+                          {dif.notaLocal !== null ? (
+                            <span className="text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                              {dif.notaLocal}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 italic font-normal">Pendiente (null)</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Navegación por Pestañas del Cuaderno */}
       <div className="border-b border-slate-200 bg-slate-50 px-4 sm:px-6 overflow-x-auto">
@@ -437,13 +589,29 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
                               {act.advertenciaRubrica || 'Vinculación con criterios pendiente de verificar'}
                             </span>
                           )}
+                          {act.rubrica_id && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedRubricaId(act.rubrica_id || null);
+                                setActiveTab('rubricas');
+                              }}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-colors"
+                              title="Abrir la matriz de niveles y descriptores de esta rúbrica"
+                            >
+                              <Table className="w-3 h-3 text-purple-600" aria-hidden="true" />
+                              <span>Ver rúbrica</span>
+                            </button>
+                          )}
                         </div>
 
-                        {act.metodo && (
-                          <span className="text-[11px] text-slate-500 font-mono">
-                            Método: <span className="font-semibold text-slate-700">{act.metodo}</span>
-                          </span>
-                        )}
+                        <div className="flex items-center gap-3">
+                          {act.metodo && (
+                            <span className="text-[11px] text-slate-500 font-mono">
+                              Método: <span className="font-semibold text-slate-700">{act.metodo}</span>
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -508,95 +676,18 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
           </div>
         )}
 
-        {/* PESTAÑA: RÚBRICAS */}
+        {/* PESTAÑA: RÚBRICAS (FASE 4: EVALUACIÓN DE ALUMNOS Y MATRIZ DE RÚBRICA) */}
         {activeTab === 'rubricas' && (
-          <div>
-            {rubricas.length === 0 ? (
-              <div className="text-center py-10 px-4 rounded-xl border border-dashed border-slate-200 bg-slate-50">
-                <Table className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                <p className="text-sm font-semibold text-slate-700">No hay rúbricas en este grupo</p>
-                <p className="text-xs text-slate-500 mt-1">La tabla public.rubricas no contiene registros para este grupo.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {rubricas.map((rub) => {
-                  const itemsCount = Array.isArray(rub.items) ? rub.items.length : 0;
-                  const actividadesAsociadas = actividades.filter((a) => a.rubrica_id === rub.id);
-
-                  // Extraer criterios únicos mencionados en los items
-                  const criteriosMencionados = new Set<string>();
-                  if (Array.isArray(rub.items)) {
-                    for (const it of rub.items) {
-                      if (it && typeof it === 'object') {
-                        if (typeof it.criterio === 'string' && it.criterio.trim()) {
-                          criteriosMencionados.add(it.criterio.trim());
-                        }
-                        if (Array.isArray(it.criterios)) {
-                          it.criterios.forEach((c: any) => {
-                            if (typeof c === 'string' && c.trim()) criteriosMencionados.add(c.trim());
-                          });
-                        }
-                      }
-                    }
-                  }
-
-                  return (
-                    <div
-                      key={rub.id}
-                      className="p-5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 transition-colors space-y-3"
-                    >
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-base font-bold text-slate-900">{rub.titulo}</h4>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200 uppercase">
-                              {rub.tipo || 'Rúbrica'}
-                            </span>
-                          </div>
-                          {rub.descripcion && (
-                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                              {rub.descripcion}
-                            </p>
-                          )}
-                        </div>
-
-                        <span className="text-xs font-mono text-slate-400 shrink-0">
-                          ID: {rub.id}
-                        </span>
-                      </div>
-
-                      <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
-                        <div className="flex items-center gap-4">
-                          <span className="text-slate-600">
-                            Apartados declarados: <strong className="text-slate-900">{itemsCount}</strong>
-                          </span>
-                          <span className="text-slate-600">
-                            Actividades vinculadas: <strong className="text-slate-900">{actividadesAsociadas.length}</strong>
-                          </span>
-                        </div>
-
-                        {criteriosMencionados.size > 0 && (
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-slate-500 text-[11px]">Criterios en items:</span>
-                            <div className="flex flex-wrap gap-1">
-                              {Array.from(criteriosMencionados).map((cod) => (
-                                <span
-                                  key={cod}
-                                  className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 font-mono text-[11px] font-bold border border-indigo-200"
-                                >
-                                  {cod}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <RubricasView
+            rubricas={rubricas}
+            criterios={criterios}
+            actividades={actividades}
+            alumnos={alumnos}
+            calificaciones={calificaciones}
+            grupoId={grupo.id}
+            initialRubricaId={selectedRubricaId}
+            onUpdateCalificaciones={handleUpdateCalificaciones}
+          />
         )}
 
         {/* PESTAÑA: CALIFICACIONES (DIAGNÓSTICO DE SOLO LECTURA) */}
@@ -615,7 +706,7 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data }) => {
                 <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start gap-2">
                   <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                   <p>
-                    <strong>Vista diagnóstica de solo lectura:</strong> Se muestran las calificaciones reales almacenadas en <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">public.calificaciones</code>. En esta fase no se calculan medias ni se modifican los registros.
+                    <strong>Vista diagnóstica de solo lectura:</strong> Se muestran las calificaciones numéricas reales almacenadas en <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">public.calificaciones</code>. Las evidencias pendientes se representan mediante ausencia de fila en la base de datos (sin almacenar nulls ni ceros ficticios).
                   </p>
                 </div>
 

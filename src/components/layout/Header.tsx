@@ -22,7 +22,7 @@ export const Header: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="font-bold text-lg text-slate-900 tracking-tight">Fernanditio</span>
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
-                Fase 2
+                Fase 4: Evaluación
               </span>
             </div>
             <p className="text-xs text-slate-500 hidden sm:block">
