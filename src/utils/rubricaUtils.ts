@@ -6,13 +6,15 @@
 import { Rubrica, RubricaItem } from '../types';
 
 export interface NormalizedRubricaItem {
-  id: string;
+  id: string; // Clave para renderizado determinista y estado local en UI (React key o visualId)
+  uuid?: string; // Identificador UUID persistente verificado (solo presente si existe en los datos persistidos)
+  hasPersistentUuid: boolean; // Indica explícitamente si el apartado posee un UUID persistente verificado
   numero: string;
   titulo: string;
   peso: number | null;
   criterios: string[];
   descriptores: Record<string, string>;
-  raw: any;
+  raw: any; // Objeto original sin mutación
 }
 
 export interface NormalizedRubrica {
@@ -188,6 +190,90 @@ export function sortNiveles(niveles: string[], asc: boolean = true): string[] {
 }
 
 /**
+ * Expresión regular canónica de UUID estándar (RFC 4122 y RFC 9562).
+ * Estructura estándar 8-4-4-4-12 en notación hexadecimal (36 caracteres con guiones).
+ * No es sensible a mayúsculas/minúsculas.
+ */
+export const CANONICAL_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Expresión regular para validar formato estándar UUID con versión y variante formal (RFC 4122 v1-v5 y RFC 9562 v6-v8).
+ */
+export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Comprueba si un valor es una cadena UUID canónica válida (RFC 4122 / RFC 9562).
+ * Ignora espacios en blanco al inicio o al final.
+ */
+export function isValidUuid(value: any): boolean {
+  if (typeof value !== 'string') return false;
+  const clean = value.trim();
+  return CANONICAL_UUID_REGEX.test(clean);
+}
+
+/**
+ * Genera un UUID v4 criptográficamente seguro utilizando crypto.randomUUID
+ * o crypto.getRandomValues (RFC 4122 v4). No utiliza Math.random bajo ninguna circunstancia.
+ * Falla de forma explícita si el entorno carece de un CSPRNG disponible.
+ */
+export function generateUuid(): string {
+  const c = typeof globalThis !== 'undefined' && globalThis.crypto
+    ? globalThis.crypto
+    : (typeof crypto !== 'undefined' ? crypto : undefined);
+
+  if (c && typeof c.randomUUID === 'function') {
+    return c.randomUUID();
+  }
+
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Versión 4 (RFC 4122)
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variante RFC 4122
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  throw new Error('CSPRNG no disponible: el entorno carece de soporte criptográfico seguro para generar UUIDs');
+}
+
+/**
+ * Asegura que una lista de apartados disponga de UUID persistente e inmutable.
+ * Utilidad pura, sin efectos secundarios, destinada exclusivamente a flujos explícitos
+ * futuros de creación, duplicación, importación o guardado de rúbricas.
+ *
+ * Reglas garantizadas:
+ * 1. Conserva estrictamente los UUID válidos existentes (sin regenerarlos).
+ * 2. Asigna un UUID nuevo (v4 seguro) a cada apartado cuyo ID esté ausente, vacío o no sea un UUID válido.
+ * 3. Preserva el 100% de las propiedades originales de cada apartado (incluyendo campos desconocidos o históricos).
+ * 4. Preserva el orden original del array.
+ * 5. No muta el array recibido ni los objetos originales que contiene (inmutabilidad estricta).
+ * 6. Falla de forma explícita si no existe un generador criptográfico seguro en el entorno.
+ * 7. Es idempotente: una segunda ejecución sobre una lista normalizada produce el mismo resultado idéntico.
+ */
+export function asegurarApartadosConUuid<T extends Record<string, any>>(items: T[]): T[] {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    
+    // Si ya dispone de un UUID válido, se conserva intacto (recortando posibles espacios)
+    if (isValidUuid(item.id)) {
+      const cleanId = String(item.id).trim();
+      return {
+        ...item,
+        id: cleanId,
+      };
+    }
+
+    // Si carece de UUID válido (ausente, nulo, vacío, numérico o sintético), se genera uno nuevo seguro
+    return {
+      ...item,
+      id: generateUuid(),
+    };
+  });
+}
+
+/**
  * Normaliza y estructura una rúbrica para su visualización exhaustiva
  */
 export function normalizeRubrica(rubrica: Rubrica): NormalizedRubrica {
@@ -248,8 +334,20 @@ export function normalizeRubrica(rubrica: Rubrica): NormalizedRubrica {
     const descriptores = extractItemDescriptores(item);
     Object.keys(descriptores).forEach((k) => uniqueNivelesSet.add(k));
 
+    // Identificador persistente verificado vs. Clave visual para la UI:
+    // 1. Si el ítem ya cuenta con un UUID válido en los datos persistidos, se expone en 'uuid'.
+    // 2. Si carece de UUID persistente, 'uuid' permanece undefined (nunca se presenta un ID sintético como persistente).
+    // 3. Para 'id' (utilizado por React como key de renderizado y acordeones), se usa el id existente o 'item-${index}'.
+    // 4. El objeto original referenciado en 'raw' se conserva estrictamente intacto, sin mutaciones.
+    const persistentUuid = isValidUuid(item.id) ? item.id.trim() : undefined;
+    const visualId = (typeof item.id === 'string' && item.id.trim().length > 0)
+      ? item.id.trim()
+      : `item-${index}`;
+
     return {
-      id: item.id || `item-${index}`,
+      id: visualId,
+      uuid: persistentUuid,
+      hasPersistentUuid: Boolean(persistentUuid),
       numero,
       titulo,
       peso,

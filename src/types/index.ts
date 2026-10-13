@@ -72,6 +72,7 @@ export interface Seccion {
 }
 
 export interface RubricaItem {
+  id?: string; // Identificador UUID persistente (RFC 4122/9562); ausente u opcional en rúbricas históricas
   numero?: string;
   titulo?: string;
   peso?: number | null;
