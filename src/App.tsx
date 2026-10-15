@@ -5,9 +5,10 @@
 
 import React from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { CuadernoProvider } from './context/CuadernoContext';
 import { Header } from './components/layout/Header';
 import { LoginView } from './components/auth/LoginView';
-import { WelcomeView } from './components/dashboard/WelcomeView';
+import { MainContent } from './components/dashboard/MainContent';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 
@@ -26,15 +27,17 @@ const AppContent: React.FC = () => {
     );
   }
 
-  // 2. Estado Autenticado: Muestra la vista del docente
+  // 2. Estado Autenticado: Muestra la cabecera global de dos filas y el contenido del cuaderno
   if (status === 'authenticated') {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col">
-        <Header />
-        <main className="flex-1 py-6">
-          <WelcomeView />
-        </main>
-      </div>
+      <CuadernoProvider>
+        <div className="min-h-screen bg-slate-50 flex flex-col">
+          <Header />
+          <main className="flex-1 py-5 px-3 sm:px-6 max-w-7xl w-full mx-auto">
+            <MainContent />
+          </main>
+        </div>
+      </CuadernoProvider>
     );
   }
 

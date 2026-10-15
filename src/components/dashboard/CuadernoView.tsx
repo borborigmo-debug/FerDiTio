@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { CuadernoGrupoData, Calificacion } from '../../types';
+import { CuadernoGrupoData, Calificacion, CalificacionApartado } from '../../types';
 import {
   Users,
   Target,
@@ -50,6 +50,17 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data, onUpdateCuader
     Array.isArray(data?.calificaciones) ? data.calificaciones : []
   );
 
+  // Calificaciones individuales de apartados de rúbrica
+  const [calificacionesApartados, setCalificacionesApartados] = useState<CalificacionApartado[]>(
+    Array.isArray(data?.calificacionesApartados) ? data.calificacionesApartados : []
+  );
+
+  React.useEffect(() => {
+    if (Array.isArray(data?.calificacionesApartados)) {
+      setCalificacionesApartados(data.calificacionesApartados);
+    }
+  }, [data?.calificacionesApartados]);
+
   // Diagnóstico seguro de respaldo local pendiente
   const [diagnosticoRespaldo, setDiagnosticoRespaldo] = useState<DiagnosticoRespaldo | null>(null);
   const [mostrarDetallesRespaldo, setMostrarDetallesRespaldo] = useState<boolean>(false);
@@ -75,6 +86,20 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data, onUpdateCuader
         estadisticas: {
           ...data.estadisticas,
           totalCalificaciones: nuevasCalifs.length,
+        },
+      });
+    }
+  };
+
+  const handleUpdateCalificacionesApartados = (nuevasApartados: CalificacionApartado[]) => {
+    setCalificacionesApartados(nuevasApartados);
+    if (onUpdateCuadernoData && data) {
+      onUpdateCuadernoData({
+        ...data,
+        calificacionesApartados: nuevasApartados,
+        estadisticas: {
+          ...data.estadisticas,
+          totalCalificacionesApartados: nuevasApartados.length,
         },
       });
     }
@@ -684,9 +709,11 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data, onUpdateCuader
             actividades={actividades}
             alumnos={alumnos}
             calificaciones={calificaciones}
+            calificacionesApartados={calificacionesApartados}
             grupoId={grupo.id}
             initialRubricaId={selectedRubricaId}
             onUpdateCalificaciones={handleUpdateCalificaciones}
+            onUpdateCalificacionesApartados={handleUpdateCalificacionesApartados}
           />
         )}
 

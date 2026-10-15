@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { Rubrica, Criterio, ActividadDetalle, Alumno, Calificacion } from '../../types';
+import { Rubrica, Criterio, ActividadDetalle, Alumno, Calificacion, CalificacionApartado } from '../../types';
 import { RubricaDetalle } from './RubricaDetalle';
 import { RubricaEvaluacionModal } from './RubricaEvaluacionModal';
 import { normalizeRubrica } from '../../utils/rubricaUtils';
@@ -28,9 +28,11 @@ interface RubricasViewProps {
   actividades: ActividadDetalle[];
   alumnos: Alumno[];
   calificaciones: Calificacion[];
+  calificacionesApartados?: CalificacionApartado[];
   grupoId: string;
   initialRubricaId?: string | null;
   onUpdateCalificaciones?: (c: Calificacion[]) => void;
+  onUpdateCalificacionesApartados?: (ca: CalificacionApartado[]) => void;
 }
 
 export const RubricasView: React.FC<RubricasViewProps> = ({
@@ -39,9 +41,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
   actividades,
   alumnos,
   calificaciones,
+  calificacionesApartados = [],
   grupoId,
   initialRubricaId = null,
   onUpdateCalificaciones,
+  onUpdateCalificacionesApartados,
 }) => {
   // Rúbrica seleccionada actualmente para visualización detallada de la matriz
   const [selectedRubricaId, setSelectedRubricaId] = useState<string | null>(
@@ -270,7 +274,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
         </div>
       )}
 
-      {/* Modal de Evaluación Consecutiva de Alumnos (Fase 4: Réplica de Fernanditio 2) */}
+      {/* Modal de Evaluación Consecutiva de Alumnos con apartados persistentes */}
       {rubricaEvaluando && (
         <RubricaEvaluacionModal
           rubrica={rubricaEvaluando}
@@ -278,11 +282,17 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
           criterios={criterios}
           actividades={actividades}
           calificaciones={calificaciones}
+          calificacionesApartados={calificacionesApartados}
           grupoId={grupoId}
           onClose={() => setRubricaEvaluando(null)}
           onUpdateCalificaciones={(nuevasCalifs) => {
             if (onUpdateCalificaciones) {
               onUpdateCalificaciones(nuevasCalifs);
+            }
+          }}
+          onUpdateCalificacionesApartados={(nuevasApartados) => {
+            if (onUpdateCalificacionesApartados) {
+              onUpdateCalificacionesApartados(nuevasApartados);
             }
           }}
         />

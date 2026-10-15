@@ -100,6 +100,9 @@ export interface Actividad {
   seccion_id?: string | null;
   metodo?: string | null;
   rubrica_id?: string | null;
+  fecha?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 /**
@@ -121,6 +124,22 @@ export interface Calificacion {
 }
 
 /**
+ * Calificación granular e individual de un apartado específico de una rúbrica.
+ * Asocia inequívocamente al alumno, la actividad real, la rúbrica y el UUID del apartado.
+ * La ausencia de fila en Supabase representa 'pendiente de evaluar'.
+ */
+export interface CalificacionApartado {
+  id: number | string; // bigserial en PostgreSQL o temporal
+  grupo_id: string;
+  alumno_id: string;
+  actividad_id?: string | null;
+  rubrica_id: string;
+  apartado_id: string; // UUID persistente del apartado
+  nota: number; // Numérico (0.00 a 10.00). El 0 es una calificación real.
+  updated_at?: string;
+}
+
+/**
  * Estructura completa de lectura del cuaderno para un grupo seleccionado
  */
 export interface CuadernoGrupoData {
@@ -131,6 +150,7 @@ export interface CuadernoGrupoData {
   secciones: Seccion[];
   rubricas: Rubrica[];
   calificaciones: Calificacion[];
+  calificacionesApartados?: CalificacionApartado[];
   estadisticas: {
     totalAlumnos: number;
     totalCriterios: number;
@@ -138,5 +158,6 @@ export interface CuadernoGrupoData {
     totalRubricas: number;
     totalSecciones: number;
     totalCalificaciones: number;
+    totalCalificacionesApartados?: number;
   };
 }

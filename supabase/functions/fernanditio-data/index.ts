@@ -218,6 +218,279 @@ serve(async (req: Request) => {
         );
       }
 
+      // Comprobación de si es petición para calificaciones de apartados
+      const isApartados = body?.tipo === 'apartados' 
+        || Boolean(body?.calificacionesApartados) 
+        || url.pathname.includes('/calificaciones-apartados');
+
+      if (isApartados) {
+        const rawApartados = Array.isArray(body?.calificacionesApartados) 
+          ? body.calificacionesApartados 
+          : (Array.isArray(body?.calificaciones) ? body.calificaciones : []);
+        const rawRetirarApartados = Array.isArray(body?.retirar) ? body.retirar : [];
+
+        const itemsAGuardarApartados: Array<{
+          alumnoId: string;
+          apartadoId: string;
+          rubricaId: string;
+          actividadId?: string | null;
+          nota: number;
+        }> = [];
+        const itemsARetirarApartados: Array<{
+          alumnoId: string;
+          apartadoId: string;
+          rubricaId: string;
+          actividadId?: string | null;
+        }> = [];
+
+        for (let i = 0; i < rawApartados.length; i++) {
+          const item = rawApartados[i];
+          if (!item || typeof item !== "object") continue;
+          const alId = typeof item.alumnoId === "string" ? item.alumnoId.trim() : "";
+          const apId = typeof item.apartadoId === "string" ? item.apartadoId.trim() : "";
+          const rubId = typeof item.rubricaId === "string" ? item.rubricaId.trim() : "";
+          const actId = typeof item.actividadId === "string" && item.actividadId.trim() ? item.actividadId.trim() : null;
+
+          if (!alId || !apId || !rubId) continue;
+
+          if (item.nota !== null && item.nota !== undefined) {
+            const num = Number(item.nota);
+            if (!isNaN(num) && isFinite(num) && num >= 0 && num <= 10) {
+              itemsAGuardarApartados.push({
+                alumnoId: alId,
+                apartadoId: apId,
+                rubricaId: rubId,
+                actividadId: actId,
+                nota: num,
+              });
+            }
+          } else {
+            itemsARetirarApartados.push({
+              alumnoId: alId,
+              apartadoId: apId,
+              rubricaId: rubId,
+              actividadId: actId,
+            });
+          }
+        }
+
+        for (let i = 0; i < rawRetirarApartados.length; i++) {
+          const item = rawRetirarApartados[i];
+          if (!item || typeof item !== "object") continue;
+          const alId = typeof item.alumnoId === "string" ? item.alumnoId.trim() : "";
+          const apId = typeof item.apartadoId === "string" ? item.apartadoId.trim() : "";
+          const rubId = typeof item.rubricaId === "string" ? item.rubricaId.trim() : "";
+          const actId = typeof item.actividadId === "string" && item.actividadId.trim() ? item.actividadId.trim() : null;
+          if (alId && apId && rubId) {
+            itemsARetirarApartados.push({ alumnoId: alId, apartadoId: apId, rubricaId: rubId, actividadId: actId });
+          }
+        }
+
+        // Verificación de propiedad del grupo
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Ejecución transaccional mediante RPC o tabla directa
+        const payloadGuardar = itemsAGuardarApartados.map((it) => ({
+          alumno_id: it.alumnoId,
+          apartado_id: it.apartadoId,
+          rubrica_id: it.rubricaId,
+          actividad_id: it.actividadId,
+          nota: it.nota,
+        }));
+        const payloadRetirar = itemsARetirarApartados.map((it) => ({
+          alumno_id: it.alumnoId,
+          apartado_id: it.apartadoId,
+          rubrica_id: it.rubricaId,
+          actividad_id: it.actividadId,
+        }));
+
+        let rpcResult: any = null;
+        let rpcError: any = null;
+
+        try {
+          const res = await supabase.rpc("persistir_calificaciones_apartados_lote", {
+            p_grupo_id: grupo.id,
+            p_guardar: payloadGuardar,
+            p_retirar: payloadRetirar,
+          });
+          rpcResult = res.data;
+          rpcError = res.error;
+        } catch (e) {
+          rpcError = e;
+        }
+
+        // Solo activar fallback si se confirma formalmente que la función RPC no existe en Supabase
+        const isMissingRpc = Boolean(
+          rpcError && (
+            rpcError.code === "42883" || // undefined_function
+            rpcError.code === "PGRST202" || // PostgREST function not found in schema cache
+            (typeof rpcError.message === "string" &&
+              rpcError.message.toLowerCase().includes("persistir_calificaciones_apartados_lote") &&
+              rpcError.message.toLowerCase().includes("does not exist"))
+          )
+        );
+
+        if (isMissingRpc) {
+          // Validar pertenencia estricta de todas las entidades antes de cualquier escritura directa
+          const uniqueAlumnoIds = Array.from(new Set([
+            ...payloadGuardar.map((p) => p.alumno_id),
+            ...payloadRetirar.map((p) => p.alumno_id),
+          ]));
+          if (uniqueAlumnoIds.length > 0) {
+            const { data: alumnosValidos, error: alErr } = await supabase
+              .from("alumnos")
+              .select("id")
+              .eq("grupo_id", grupo.id)
+              .in("id", uniqueAlumnoIds);
+            if (alErr || !alumnosValidos || alumnosValidos.length !== uniqueAlumnoIds.length) {
+              return new Response(
+                JSON.stringify({ error: "Uno o más alumnos no pertenecen al grupo autorizado." }),
+                { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+          }
+
+          const uniqueRubricaIds = Array.from(new Set([
+            ...payloadGuardar.map((p) => p.rubrica_id),
+            ...payloadRetirar.map((p) => p.rubrica_id),
+          ]));
+          if (uniqueRubricaIds.length > 0) {
+            const { data: rubricasValidas, error: rubErr } = await supabase
+              .from("rubricas")
+              .select("id")
+              .eq("grupo_id", grupo.id)
+              .in("id", uniqueRubricaIds);
+            if (rubErr || !rubricasValidas || rubricasValidas.length !== uniqueRubricaIds.length) {
+              return new Response(
+                JSON.stringify({ error: "Una o más rúbricas no pertenecen al grupo autorizado." }),
+                { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+          }
+
+          const uniqueActividadIds = Array.from(new Set([
+            ...payloadGuardar.map((p) => p.actividad_id).filter(Boolean),
+            ...payloadRetirar.map((p) => p.actividad_id).filter(Boolean),
+          ])) as string[];
+          if (uniqueActividadIds.length > 0) {
+            const { data: actividadesValidas, error: actErr } = await supabase
+              .from("actividades")
+              .select("id")
+              .eq("grupo_id", grupo.id)
+              .in("id", uniqueActividadIds);
+            if (actErr || !actividadesValidas || actividadesValidas.length !== uniqueActividadIds.length) {
+              return new Response(
+                JSON.stringify({ error: "Una o más actividades no pertenecen al grupo autorizado." }),
+                { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+          }
+
+          // Fallback directo sobre la tabla
+          if (payloadRetirar.length > 0) {
+            for (const ret of payloadRetirar) {
+              let query = supabase
+                .from("calificaciones_apartados")
+                .delete()
+                .eq("grupo_id", grupo.id)
+                .eq("alumno_id", ret.alumno_id)
+                .eq("rubrica_id", ret.rubrica_id)
+                .eq("apartado_id", ret.apartado_id);
+              if (ret.actividad_id) {
+                query = query.eq("actividad_id", ret.actividad_id);
+              } else {
+                query = query.is("actividad_id", null);
+              }
+              await query;
+            }
+          }
+
+          if (payloadGuardar.length > 0) {
+            for (const g of payloadGuardar) {
+              let findQuery = supabase
+                .from("calificaciones_apartados")
+                .select("id")
+                .eq("grupo_id", grupo.id)
+                .eq("alumno_id", g.alumno_id)
+                .eq("rubrica_id", g.rubrica_id)
+                .eq("apartado_id", g.apartado_id);
+              if (g.actividad_id) {
+                findQuery = findQuery.eq("actividad_id", g.actividad_id);
+              } else {
+                findQuery = findQuery.is("actividad_id", null);
+              }
+              const { data: existingRow } = await findQuery.maybeSingle();
+
+              if (existingRow?.id) {
+                await supabase
+                  .from("calificaciones_apartados")
+                  .update({
+                    nota: g.nota,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("id", existingRow.id);
+              } else {
+                await supabase
+                  .from("calificaciones_apartados")
+                  .insert({
+                    grupo_id: grupo.id,
+                    alumno_id: g.alumno_id,
+                    actividad_id: g.actividad_id || null,
+                    rubrica_id: g.rubrica_id,
+                    apartado_id: g.apartado_id,
+                    nota: g.nota,
+                    updated_at: new Date().toISOString(),
+                  });
+              }
+            }
+          }
+
+          const { data: allApartados } = await supabase
+            .from("calificaciones_apartados")
+            .select("*")
+            .eq("grupo_id", grupo.id);
+
+          return new Response(
+            JSON.stringify({
+              success: true,
+              guardadas: payloadGuardar.length,
+              retiradas: payloadRetirar.length,
+              actualizadas: payloadGuardar.length + payloadRetirar.length,
+              calificacionesApartados: allApartados || [],
+            }),
+            { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        } else if (rpcError) {
+          return new Response(
+            JSON.stringify({ error: `Error al persistir calificaciones de apartados: ${rpcError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            guardadas: typeof rpcResult?.guardadas === "number" ? rpcResult.guardadas : itemsAGuardarApartados.length,
+            retiradas: typeof rpcResult?.retiradas === "number" ? rpcResult.retiradas : itemsARetirarApartados.length,
+            actualizadas: typeof rpcResult?.actualizadas === "number" ? rpcResult.actualizadas : (itemsAGuardarApartados.length + itemsARetirarApartados.length),
+            calificacionesApartados: rpcResult?.calificacionesApartados || [],
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       // Clasificación explícita de operaciones: Guardar (nota numérica finita 0-10) vs Retirar (pendiente/ausencia de fila)
       if (body?.calificaciones !== undefined && !Array.isArray(body?.calificaciones)) {
         return new Response(
@@ -606,6 +879,20 @@ serve(async (req: Request) => {
         };
       });
 
+      // 7.4. Recuperar calificaciones individuales por apartado si la tabla existe
+      let calificacionesApartados: any[] = [];
+      try {
+        const { data: capData, error: capError } = await supabase
+          .from("calificaciones_apartados")
+          .select("id, grupo_id, alumno_id, actividad_id, rubrica_id, apartado_id, nota, updated_at")
+          .eq("grupo_id", grupo.id);
+        if (!capError && Array.isArray(capData)) {
+          calificacionesApartados = capData;
+        }
+      } catch (err) {
+        console.warn("[fernanditio-data] calificaciones_apartados aún no disponible:", err);
+      }
+
       const responsePayload = {
         grupo,
         alumnos: alumnosResult.data || [],
@@ -614,6 +901,7 @@ serve(async (req: Request) => {
         rubricas,
         actividades: actividadesDetalle,
         calificaciones: calificacionesResult.data || [],
+        calificacionesApartados,
         estadisticas: {
           totalAlumnos: (alumnosResult.data || []).length,
           totalCriterios: (criteriosResult.data || []).length,
@@ -621,6 +909,7 @@ serve(async (req: Request) => {
           totalRubricas: rubricas.length,
           totalSecciones: (seccionesResult.data || []).length,
           totalCalificaciones: (calificacionesResult.data || []).length,
+          totalCalificacionesApartados: calificacionesApartados.length,
         },
       };
 

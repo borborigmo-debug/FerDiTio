@@ -5,6 +5,7 @@
 
 import { getCurrentIdToken } from './authService';
 import { CuadernoGrupoData } from '../types';
+import { recuperarRespaldoCalificacionesApartados } from './calificacionesService';
 
 export interface GrupoDocente {
   id: string;
@@ -161,7 +162,19 @@ export async function fetchCuadernoGrupo(
       );
     }
 
-    return data as CuadernoGrupoData;
+    const resultado = data as CuadernoGrupoData;
+    // Si la respuesta remota no incluye calificacionesApartados o está vacía,
+    // comprobar si existe un respaldo local en este dispositivo para no perder calificaciones pendientes:
+    if (!resultado.calificacionesApartados || resultado.calificacionesApartados.length === 0) {
+      const respaldoLocal = recuperarRespaldoCalificacionesApartados(resultado.grupo.id);
+      if (respaldoLocal && Array.isArray(respaldoLocal) && respaldoLocal.length > 0) {
+        resultado.calificacionesApartados = respaldoLocal;
+      } else if (!resultado.calificacionesApartados) {
+        resultado.calificacionesApartados = [];
+      }
+    }
+
+    return resultado;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw err;

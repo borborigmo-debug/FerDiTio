@@ -253,22 +253,35 @@ export function generateUuid(): string {
  */
 export function asegurarApartadosConUuid<T extends Record<string, any>>(items: T[]): T[] {
   if (!Array.isArray(items)) return [];
+  const seenUuids = new Set<string>();
+
   return items.map((item) => {
     if (!item || typeof item !== 'object') return item;
     
-    // Si ya dispone de un UUID válido, se conserva intacto (recortando posibles espacios)
+    // Si ya dispone de un UUID válido y NO se ha repetido previamente en esta rúbrica
     if (isValidUuid(item.id)) {
-      const cleanId = String(item.id).trim();
-      return {
-        ...item,
-        id: cleanId,
-      };
+      const cleanId = String(item.id).trim().toLowerCase();
+      if (!seenUuids.has(cleanId)) {
+        seenUuids.add(cleanId);
+        return {
+          ...item,
+          id: cleanId,
+        };
+      }
+      // Si el UUID ya apareció en un apartado anterior dentro de la misma rúbrica,
+      // se corrige la colisión generando un UUID único nuevo
     }
 
-    // Si carece de UUID válido (ausente, nulo, vacío, numérico o sintético), se genera uno nuevo seguro
+    // Si carece de UUID válido (ausente, nulo, vacío, sintético 'item-0') o es duplicado:
+    let newUuid = generateUuid().toLowerCase();
+    while (seenUuids.has(newUuid)) {
+      newUuid = generateUuid().toLowerCase();
+    }
+    seenUuids.add(newUuid);
+
     return {
       ...item,
-      id: generateUuid(),
+      id: newUuid,
     };
   });
 }

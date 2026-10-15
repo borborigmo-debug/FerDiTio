@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Calificacion } from '../types';
+import { Calificacion, CalificacionApartado } from '../types';
 import { getCurrentIdToken } from './authService';
 
 export interface GuardarCalificacionesPayload {
@@ -336,3 +336,267 @@ export function compararRespaldoConRemoto(
     calificacionesLocales: respaldoLocal,
   };
 }
+
+// =========================================================================
+// SERVICIOS PARA CALIFICACIONES GRANULARES POR APARTADO DE RÚBRICA
+// =========================================================================
+
+const STORAGE_APARTADOS_KEY_PREFIX = 'fernanditio_calif_apartados_backup_';
+
+export interface GuardarCalificacionesApartadosPayload {
+  grupoId: string;
+  calificacionesApartados?: Array<{
+    alumnoId: string;
+    apartadoId: string; // UUID persistente del apartado
+    rubricaId: string;
+    actividadId?: string | null;
+    nota: number; // 0 a 10
+  }>;
+  retirar?: Array<{
+    alumnoId: string;
+    apartadoId: string;
+    rubricaId: string;
+    actividadId?: string | null;
+  }>;
+}
+
+export interface GuardarCalificacionesApartadosResultado {
+  success: boolean;
+  actualizadas: number;
+  guardadas?: number;
+  retiradas?: number;
+  calificacionesApartados: CalificacionApartado[];
+  error?: string;
+  origen?: 'supabase' | 'local_backup';
+}
+
+/**
+ * Guarda y sincroniza las calificaciones individuales de los apartados de una rúbrica en Supabase.
+ * - Cada calificación está asociada a un UUID persistente de apartado.
+ * - Distingue estrictamente entre 0.0 (calificación real) y null/ausencia (pendiente de evaluar).
+ * - No modifica ni altera las calificaciones históricas de public.calificaciones.
+ */
+export async function guardarCalificacionesApartados(
+  grupoId: string,
+  calificacionesApartadosActuales: CalificacionApartado[],
+  nuevasNotas: Array<{
+    alumnoId: string;
+    apartadoId: string;
+    rubricaId: string;
+    actividadId?: string | null;
+    nota: number | null; // null = retirar / pendiente; number (0-10) = guardar
+  }>
+): Promise<GuardarCalificacionesApartadosResultado> {
+  if (!grupoId || typeof grupoId !== 'string') {
+    throw new Error('Identificador de grupo no válido.');
+  }
+
+  // 1. Validaciones de entrada
+  for (const item of nuevasNotas) {
+    if (!item.alumnoId || typeof item.alumnoId !== 'string') {
+      throw new Error('Identificador de alumno no válido en la calificación del apartado.');
+    }
+    if (!item.apartadoId || typeof item.apartadoId !== 'string') {
+      throw new Error('Identificador UUID de apartado no válido.');
+    }
+    if (!item.rubricaId || typeof item.rubricaId !== 'string') {
+      throw new Error('Identificador de rúbrica no válido.');
+    }
+    if (item.nota !== null && item.nota !== undefined) {
+      if (typeof item.nota !== 'number' || isNaN(item.nota) || !isFinite(item.nota) || item.nota < 0 || item.nota > 10) {
+        throw new Error(`La calificación de ${item.nota} en el apartado está fuera del rango permitido (0-10).`);
+      }
+    }
+  }
+
+  // 2. Cálculo optimista y división en operaciones
+  const mapa = new Map<string, CalificacionApartado>();
+  (calificacionesApartadosActuales || []).forEach((ca) => {
+    const actKey = ca.actividad_id || '';
+    mapa.set(`${ca.alumno_id}_${actKey}_${ca.rubrica_id}_${ca.apartado_id}`, { ...ca });
+  });
+
+  const nowIso = new Date().toISOString();
+  const paraGuardar: Array<{
+    alumnoId: string;
+    apartadoId: string;
+    rubricaId: string;
+    actividadId?: string | null;
+    nota: number;
+  }> = [];
+  const paraRetirar: Array<{
+    alumnoId: string;
+    apartadoId: string;
+    rubricaId: string;
+    actividadId?: string | null;
+  }> = [];
+
+  let contadorGuardadas = 0;
+  let contadorRetiradas = 0;
+
+  for (const n of nuevasNotas) {
+    const alId = n.alumnoId.trim();
+    const apId = n.apartadoId.trim();
+    const rubId = n.rubricaId.trim();
+    const actId = n.actividadId ? n.actividadId.trim() : null;
+    const actKey = actId || '';
+    const key = `${alId}_${actKey}_${rubId}_${apId}`;
+    const existente = mapa.get(key);
+
+    if (n.nota !== null && n.nota !== undefined) {
+      const notaNum = Number(n.nota);
+      paraGuardar.push({
+        alumnoId: alId,
+        apartadoId: apId,
+        rubricaId: rubId,
+        actividadId: actId,
+        nota: notaNum,
+      });
+
+      if (existente) {
+        mapa.set(key, {
+          ...existente,
+          nota: notaNum,
+          updated_at: nowIso,
+        });
+      } else {
+        const nuevoId = Math.floor(Date.now() + Math.random() * 1000);
+        mapa.set(key, {
+          id: nuevoId,
+          grupo_id: grupoId,
+          alumno_id: alId,
+          actividad_id: actId || null,
+          rubrica_id: rubId,
+          apartado_id: apId,
+          nota: notaNum,
+          updated_at: nowIso,
+        });
+      }
+      contadorGuardadas++;
+    } else {
+      if (existente) {
+        paraRetirar.push({
+          alumnoId: alId,
+          apartadoId: apId,
+          rubricaId: rubId,
+          actividadId: actId,
+        });
+        mapa.delete(key);
+        contadorRetiradas++;
+      }
+    }
+  }
+
+  if (paraGuardar.length === 0 && paraRetirar.length === 0) {
+    return {
+      success: true,
+      actualizadas: 0,
+      guardadas: 0,
+      retiradas: 0,
+      calificacionesApartados: Array.from(mapa.values()),
+      origen: 'supabase',
+    };
+  }
+
+  const listaActualizadaLocal = Array.from(mapa.values());
+
+  // 3. Respaldo local preventivo en localStorage
+  try {
+    const backupKey = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+    localStorage.setItem(backupKey, JSON.stringify(listaActualizadaLocal));
+  } catch (err) {
+    console.warn('[calificacionesService] No se pudo guardar el respaldo local de apartados:', err);
+  }
+
+  // 4. Llamada al servidor Supabase mediante Edge Function
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión de autenticación activa para persistir en Supabase.');
+  }
+
+  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: 'apartados',
+        grupoId,
+        calificacionesApartados: paraGuardar,
+        retirar: paraRetirar,
+      }),
+    });
+
+    if (!response.ok) {
+      let detalleError = `Error HTTP ${response.status}: ${response.statusText}`;
+      try {
+        const jsonError = await response.json();
+        if (jsonError?.error) detalleError = jsonError.error;
+      } catch {
+        // Fallo de parseo json
+      }
+      throw new Error(detalleError);
+    }
+
+    const data = await response.json();
+    if (!data || !data.success || !Array.isArray(data.calificacionesApartados)) {
+      throw new Error('Respuesta inválida al sincronizar apartados en Supabase.');
+    }
+
+    // Actualizar respaldo local con los datos remotos
+    try {
+      const backupKey = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+      localStorage.setItem(backupKey, JSON.stringify(data.calificacionesApartados));
+    } catch (err) {
+      console.warn('[calificacionesService] No se pudo actualizar el respaldo local con Supabase:', err);
+    }
+
+    return {
+      success: true,
+      actualizadas: typeof data.actualizadas === 'number' ? data.actualizadas : (contadorGuardadas + contadorRetiradas),
+      guardadas: typeof data.guardadas === 'number' ? data.guardadas : contadorGuardadas,
+      retiradas: typeof data.retiradas === 'number' ? data.retiradas : contadorRetiradas,
+      calificacionesApartados: data.calificacionesApartados,
+      origen: 'supabase',
+    };
+  } catch (err: any) {
+    console.error('[calificacionesService] Error al guardar calificaciones de apartados:', err);
+    const msg = err?.message || 'Error de conexión con Supabase.';
+    throw new Error(`${msg}. Los cambios se han retenido en búfer local.`);
+  }
+}
+
+/**
+ * Recupera el respaldo local de apartados
+ */
+export function recuperarRespaldoCalificacionesApartados(grupoId: string): CalificacionApartado[] | null {
+  try {
+    const backupKey = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+    const item = localStorage.getItem(backupKey);
+    if (item) {
+      const parsed = JSON.parse(item);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // Ignorar fallo de parseo
+  }
+  return null;
+}
+
+/**
+ * Limpia el respaldo local de apartados
+ */
+export function limpiarRespaldoCalificacionesApartados(grupoId: string): void {
+  try {
+    const backupKey = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+    localStorage.removeItem(backupKey);
+  } catch (err) {
+    console.warn('[calificacionesService] No se pudo limpiar respaldo de apartados:', err);
+  }
+}
+
