@@ -171,6 +171,9 @@ BEGIN
     END IF;
 
     -- 5.3. Rechazo de tuplas presentes simultáneamente en p_guardar y p_retirar
+    -- Se utiliza una unión interna (INNER JOIN) entre ambas listas para verificar
+    -- si existe alguna tupla compartida (alumno, rubrica, apartado, actividad),
+    -- evitando la consulta set-operation INTERSECT con discrepancia en el número de columnas.
     IF EXISTS (
         SELECT 1
         FROM (
@@ -180,12 +183,16 @@ BEGIN
                    pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId', '')) AS act_id
             FROM jsonb_array_elements(p_guardar) elem
         ) g
-        INTERSECT
-        SELECT pg_catalog.btrim(COALESCE(elem->>'alumno_id', elem->>'alumnoId')) AS al_id,
-               pg_catalog.btrim(COALESCE(elem->>'rubrica_id', elem->>'rubricaId')) AS rub_id,
-               pg_catalog.btrim(COALESCE(elem->>'apartado_id', elem->>'apartadoId')) AS ap_id,
-               pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId', '')) AS act_id
-        FROM jsonb_array_elements(p_retirar) elem
+        INNER JOIN (
+            SELECT pg_catalog.btrim(COALESCE(elem->>'alumno_id', elem->>'alumnoId')) AS al_id,
+                   pg_catalog.btrim(COALESCE(elem->>'rubrica_id', elem->>'rubricaId')) AS rub_id,
+                   pg_catalog.btrim(COALESCE(elem->>'apartado_id', elem->>'apartadoId')) AS ap_id,
+                   pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId', '')) AS act_id
+            FROM jsonb_array_elements(p_retirar) elem
+        ) r ON g.al_id = r.al_id
+           AND g.rub_id = r.rub_id
+           AND g.ap_id = r.ap_id
+           AND g.act_id = r.act_id
     ) THEN
         RAISE EXCEPTION 'Incoherencia en lote: una o más calificaciones de apartados figuran simultáneamente en p_guardar y p_retirar';
     END IF;

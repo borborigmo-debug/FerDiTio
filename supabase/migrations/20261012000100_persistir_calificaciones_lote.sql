@@ -105,17 +105,19 @@ BEGIN
     END IF;
 
     -- 4.3. Validación de coherencia entre listas: ningún par (alumno, actividad) puede figurar simultáneamente en guardar y retirar
-    IF EXISTS (
+    IF jsonb_array_length(p_guardar) > 0 AND jsonb_array_length(p_retirar) > 0 AND EXISTS (
         SELECT 1
         FROM (
             SELECT pg_catalog.btrim(COALESCE(elem->>'alumno_id', elem->>'alumnoId')) AS al_id,
                    pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId')) AS act_id
             FROM jsonb_array_elements(p_guardar) elem
         ) g
-        INTERSECT
-        SELECT pg_catalog.btrim(COALESCE(elem->>'alumno_id', elem->>'alumnoId')) AS al_id,
-               pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId')) AS act_id
+        JOIN (
+            SELECT pg_catalog.btrim(COALESCE(elem->>'alumno_id', elem->>'alumnoId')) AS al_id,
+                   pg_catalog.btrim(COALESCE(elem->>'actividad_id', elem->>'actividadId')) AS act_id
             FROM jsonb_array_elements(p_retirar) elem
+        ) r ON r.al_id = g.al_id
+           AND r.act_id = g.act_id
     ) THEN
         RAISE EXCEPTION 'Incoherencia en lote: una o más calificaciones figuran simultáneamente en p_guardar y p_retirar';
     END IF;
