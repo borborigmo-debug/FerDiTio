@@ -8,6 +8,7 @@ import { Rubrica, RubricaItem } from '../types';
 export interface NormalizedRubricaItem {
   id: string; // Clave para renderizado determinista y estado local en UI (React key o visualId)
   uuid?: string; // Identificador UUID persistente verificado (solo presente si existe en los datos persistidos)
+  legacyId?: string; // Identificador histórico o sintético previo si fue normalizado
   hasPersistentUuid: boolean; // Indica explícitamente si el apartado posee un UUID persistente verificado
   numero: string;
   titulo: string;
@@ -273,6 +274,10 @@ export function asegurarApartadosConUuid<T extends Record<string, any>>(items: T
     }
 
     // Si carece de UUID válido (ausente, nulo, vacío, sintético 'item-0') o es duplicado:
+    const rawId = item.id !== undefined && item.id !== null ? String(item.id).trim() : undefined;
+    const hasExistingLegacyId = typeof item.legacyId === 'string' && item.legacyId.trim().length > 0;
+    const preserveLegacy = !hasExistingLegacyId && rawId && !isValidUuid(rawId) ? rawId : undefined;
+
     let newUuid = generateUuid().toLowerCase();
     while (seenUuids.has(newUuid)) {
       newUuid = generateUuid().toLowerCase();
@@ -282,6 +287,7 @@ export function asegurarApartadosConUuid<T extends Record<string, any>>(items: T
     return {
       ...item,
       id: newUuid,
+      ...(preserveLegacy ? { legacyId: preserveLegacy } : {}),
     };
   });
 }
@@ -356,10 +362,14 @@ export function normalizeRubrica(rubrica: Rubrica): NormalizedRubrica {
     const visualId = (typeof item.id === 'string' && item.id.trim().length > 0)
       ? item.id.trim()
       : `item-${index}`;
+    const legacyId = (typeof item.legacyId === 'string' && item.legacyId.trim().length > 0)
+      ? item.legacyId.trim()
+      : (visualId && !isValidUuid(visualId) ? visualId : undefined);
 
     return {
       id: visualId,
       uuid: persistentUuid,
+      legacyId,
       hasPersistentUuid: Boolean(persistentUuid),
       numero,
       titulo,

@@ -12,11 +12,12 @@ import {
   Calificacion,
   CalificacionApartado,
 } from '../../types';
-import { normalizeRubrica, isValidUuid } from '../../utils/rubricaUtils';
+import { normalizeRubrica, isValidUuid, parseRubricaItems, asegurarApartadosConUuid } from '../../utils/rubricaUtils';
 import {
   guardarCalificacionesEvaluacion,
   guardarCalificacionesApartados,
 } from '../../services/calificacionesService';
+import { asegurarYPersistirRubricaUuids } from '../../services/rubricasService';
 import { useCuaderno } from '../../context/CuadernoContext';
 import {
   User,
@@ -47,12 +48,14 @@ interface RubricaEvaluacionModalProps {
   onClose: () => void;
   onUpdateCalificaciones: (nuevasCalificaciones: Calificacion[]) => void;
   onUpdateCalificacionesApartados?: (nuevas: CalificacionApartado[]) => void;
+  onUpdateRubrica?: (rubricaActualizada: Rubrica) => void;
   initialAlumnoId?: string;
   initialActividadId?: string;
 }
 
 interface ApartadoEvaluacion {
   apartadoId: string; // UUID persistente o id canónico
+  edicionKey: string; // Clave para el estado local en calificacionesEdicion
   visualId: string;
   numero: string;
   titulo: string;
@@ -74,14 +77,49 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   onClose,
   onUpdateCalificaciones,
   onUpdateCalificacionesApartados,
+  onUpdateRubrica,
   initialAlumnoId,
   initialActividadId,
 }) => {
   // Contexto global del cuaderno para protección de cambios sin guardar
   const { setHasUnsavedChanges } = useCuaderno();
 
+  // Estado local sincronizado de la rúbrica fiel a la rúbrica remota existente
+  const [rubricaActiva, setRubricaActiva] = useState<Rubrica>(rubricaRaw);
+
+  useEffect(() => {
+    setRubricaActiva(rubricaRaw);
+  }, [rubricaRaw]);
+
+  // Asegurar que la rúbrica cuente con UUIDs persistentes e inmutables verificados en Supabase
+  useEffect(() => {
+    let cancelado = false;
+    async function verificarYPersistirUuids() {
+      const itemsRaw = parseRubricaItems(rubricaRaw.items);
+      const faltanUuids = itemsRaw.some((it: any) => !isValidUuid(it?.id));
+      if (!faltanUuids) return;
+
+      try {
+        const persistida = await asegurarYPersistirRubricaUuids(grupoId, rubricaRaw);
+        if (!cancelado) {
+          setRubricaActiva(persistida);
+          if (onUpdateRubrica) {
+            onUpdateRubrica(persistida);
+          }
+        }
+      } catch (err) {
+        console.warn('[RubricaEvaluacionModal] Error al sincronizar UUIDs de apartados en segundo plano:', err);
+      }
+    }
+
+    verificarYPersistirUuids();
+    return () => {
+      cancelado = true;
+    };
+  }, [grupoId, rubricaRaw, onUpdateRubrica]);
+
   // 1. Normalizar la rúbrica activa
-  const rubrica = useMemo(() => normalizeRubrica(rubricaRaw), [rubricaRaw]);
+  const rubrica = useMemo(() => normalizeRubrica(rubricaActiva), [rubricaActiva]);
 
   // 2. Actividades del cuaderno asociadas a esta rúbrica
   const actividadesAsociadas = useMemo(() => {
@@ -99,11 +137,20 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   // 3. Apartados evaluables reales de la rúbrica
   const apartadosEvaluables: ApartadoEvaluacion[] = useMemo(() => {
     return rubrica.items.map((it, idx) => {
-      // Priorizar UUID persistente verificado
-      const apId = (it.uuid && it.uuid.trim()) || (isValidUuid(it.id) ? String(it.id).trim() : `${rubrica.id}-apartado-${idx}`);
+      // 1. Priorizar UUID persistente verificado si existe
+      // 2. Si no, comprobar si el id existente en raw es un UUID válido
+      // 3. Evitar terminantemente generar identificadores alternativos basados en el índice o en el ID de la rúbrica
+      const apId = (it.uuid && it.uuid.trim())
+        || (isValidUuid(it.raw?.id) ? it.raw.id.trim() : '')
+        || (isValidUuid(it.id) ? it.id.trim() : '');
+
+      const histId = it.legacyId || it.raw?.legacyId || it.id;
+      const edKey = apId || (histId ? String(histId).trim() : `item_${idx}`);
+
       return {
         apartadoId: apId,
-        visualId: it.id,
+        edicionKey: edKey,
+        visualId: histId,
         numero: it.numero || String(idx + 1),
         titulo: it.titulo,
         criteriosCodigos: it.criterios || [],
@@ -139,7 +186,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
           (ca) =>
             ca.alumno_id === al.id &&
             ca.rubrica_id === rubrica.id &&
-            ca.apartado_id === item.apartadoId &&
+            ((item.apartadoId && ca.apartado_id === item.apartadoId) || (item.visualId && ca.apartado_id === item.visualId)) &&
             (actividadSeleccionadaId ? ca.actividad_id === actividadSeleccionadaId : !ca.actividad_id)
         );
         // Distingue calificación numérica finita (incluso 0) de pendiente (null o ausente)
@@ -200,14 +247,14 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
           (ca) =>
             ca.alumno_id === alumnoId &&
             ca.rubrica_id === rubrica.id &&
-            ca.apartado_id === item.apartadoId &&
+            (ca.apartado_id === item.apartadoId || (item.visualId && ca.apartado_id === item.visualId)) &&
             (actividadSeleccionadaId ? ca.actividad_id === actividadSeleccionadaId : !ca.actividad_id)
         );
 
         if (cal && cal.nota !== null && cal.nota !== undefined && !isNaN(Number(cal.nota))) {
-          mapaInicial[item.apartadoId] = Number(cal.nota);
+          mapaInicial[item.edicionKey] = Number(cal.nota);
         } else {
-          mapaInicial[item.apartadoId] = null; // Pendiente de evaluar
+          mapaInicial[item.edicionKey] = null; // Pendiente de evaluar
         }
       });
       setCalificacionesEdicion(mapaInicial);
@@ -266,13 +313,13 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
    * - Si ya estaba seleccionado, se desmarca pasando a null (pendiente).
    * - Si se pulsa otra puntuación, se asigna (incluido el 0 real).
    */
-  const handleTogglePuntuacion = (apartadoId: string, valor: number) => {
+  const handleTogglePuntuacion = (key: string, valor: number) => {
     setCalificacionesEdicion((prev) => {
-      const actual = prev[apartadoId];
+      const actual = prev[key];
       const nueva = actual === valor ? null : valor;
       return {
         ...prev,
-        [apartadoId]: nueva,
+        [key]: nueva,
       };
     });
     setHasModificacionesSinGuardar(true);
@@ -287,7 +334,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   const handlePonerCerosTodas = () => {
     const ceros: Record<string, number | null> = {};
     apartadosEvaluables.forEach((item) => {
-      ceros[item.apartadoId] = 0;
+      ceros[item.edicionKey] = 0;
     });
     setCalificacionesEdicion(ceros);
     setHasModificacionesSinGuardar(true);
@@ -301,7 +348,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   const handleLimpiarTodas = () => {
     const pendientes: Record<string, number | null> = {};
     apartadosEvaluables.forEach((item) => {
-      pendientes[item.apartadoId] = null;
+      pendientes[item.edicionKey] = null;
     });
     setCalificacionesEdicion(pendientes);
     setHasModificacionesSinGuardar(true);
@@ -358,7 +405,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
     const criteriosAcumulados = new Map<string, { notas: number[]; criterio?: Criterio }>();
 
     apartadosEvaluables.forEach((item) => {
-      const nota = calificacionesEdicion[item.apartadoId];
+      const nota = calificacionesEdicion[item.edicionKey];
       if (nota !== null && nota !== undefined && !isNaN(nota)) {
         apartadosConNota++;
         const peso = (item.peso !== null && item.peso !== undefined && item.peso > 0) ? item.peso : 1;
@@ -411,6 +458,34 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
     setMensajeExito(null);
 
     try {
+      // Asegurar que la rúbrica cuente con todos sus apartados con UUID persistidos y confirmados en Supabase antes de guardar notas
+      let rubricaFinal = rubricaActiva;
+      const itemsRaw = parseRubricaItems(rubricaFinal.items);
+      const faltanUuids = itemsRaw.some((it: any) => !isValidUuid(it?.id));
+      if (faltanUuids) {
+        try {
+          rubricaFinal = await asegurarYPersistirRubricaUuids(grupoId, rubricaFinal);
+          setRubricaActiva(rubricaFinal);
+          if (onUpdateRubrica) {
+            onUpdateRubrica(rubricaFinal);
+          }
+        } catch (rubErr: any) {
+          const detalle = rubErr?.message || 'Error de comunicación con el servidor';
+          setMensajeError(`No se pueden guardar las calificaciones: no fue posible confirmar la persistencia de los identificadores de la rúbrica en la base de datos remota (${detalle}). Compruebe la conexión o el servicio antes de reintentar.`);
+          setIsSaving(false);
+          return;
+        }
+      }
+
+      // Validar estrictamente que todos los apartados cuenten con UUID persistido y confirmado en Supabase
+      const itemsFinalesRaw = parseRubricaItems(rubricaFinal.items);
+      const apartadosSinUuidConfirmado = itemsFinalesRaw.filter((it: any) => !isValidUuid(it?.id));
+      if (apartadosSinUuidConfirmado.length > 0) {
+        setMensajeError(`No se pueden guardar las calificaciones: la rúbrica contiene ${apartadosSinUuidConfirmado.length} apartado(s) sin un identificador UUID confirmado en la base de datos remota.`);
+        setIsSaving(false);
+        return;
+      }
+
       const alumnosAGuardarIds =
         modo === 'multiple' && alumnosSeleccionadosMultiples.size > 0
           ? Array.from(alumnosSeleccionadosMultiples)
@@ -425,16 +500,25 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
       }> = [];
 
       for (const alId of alumnosAGuardarIds) {
-        for (const item of apartadosEvaluables) {
-          const nota = calificacionesEdicion[item.apartadoId] ?? null;
+        apartadosEvaluables.forEach((item, idx) => {
+          const itemFinal = itemsFinalesRaw[idx];
+          const apIdFinal = (itemFinal && isValidUuid(itemFinal.id))
+            ? String(itemFinal.id).trim().toLowerCase()
+            : (item.apartadoId && isValidUuid(item.apartadoId) ? item.apartadoId.trim().toLowerCase() : '');
+
+          if (!apIdFinal || !isValidUuid(apIdFinal)) {
+            throw new Error(`El apartado '${item.titulo}' no tiene un identificador UUID válido confirmado en Supabase. No se pueden registrar calificaciones sin identificadores persistentes.`);
+          }
+
+          const nota = calificacionesEdicion[item.edicionKey] ?? null;
           listaNuevasNotasApartados.push({
             alumnoId: alId,
-            apartadoId: item.apartadoId,
-            rubricaId: rubrica.id,
+            apartadoId: apIdFinal,
+            rubricaId: rubricaFinal.id,
             actividadId: actividadSeleccionadaId,
             nota,
           });
-        }
+        });
       }
 
       // 1. Persistir calificaciones granulares por apartado
@@ -450,47 +534,53 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
 
       // 2. Si hay una actividad asociada seleccionada, calcular la nota global de la actividad
       // y actualizar public.calificaciones para que el cuaderno refleje la nota inmediatamente
+      let avisoActividad: string | null = null;
       if (actividadSeleccionadaId) {
-        const listaCalifsActividad: Array<{
-          alumnoId: string;
-          actividadId: string;
-          nota: number | null;
-        }> = [];
+        try {
+          const listaCalifsActividad: Array<{
+            alumnoId: string;
+            actividadId: string;
+            nota: number | null;
+          }> = [];
 
-        for (const alId of alumnosAGuardarIds) {
-          let sumaNotas = 0;
-          let sumaPesos = 0;
-          let hayNotas = false;
+          for (const alId of alumnosAGuardarIds) {
+            let sumaNotas = 0;
+            let sumaPesos = 0;
+            let hayNotas = false;
 
-          apartadosEvaluables.forEach((item) => {
-            const n = calificacionesEdicion[item.apartadoId];
-            if (n !== null && n !== undefined && !isNaN(n)) {
-              hayNotas = true;
-              const peso = (item.peso !== null && item.peso !== undefined && item.peso > 0) ? item.peso : 1;
-              sumaNotas += n * peso;
-              sumaPesos += peso;
-            }
-          });
+            apartadosEvaluables.forEach((item) => {
+              const n = calificacionesEdicion[item.edicionKey];
+              if (n !== null && n !== undefined && !isNaN(n)) {
+                hayNotas = true;
+                const peso = (item.peso !== null && item.peso !== undefined && item.peso > 0) ? item.peso : 1;
+                sumaNotas += n * peso;
+                sumaPesos += peso;
+              }
+            });
 
-          const notaActividad = hayNotas && sumaPesos > 0
-            ? Math.round((sumaNotas / sumaPesos) * 100) / 100
-            : null;
+            const notaActividad = hayNotas && sumaPesos > 0
+              ? Math.round((sumaNotas / sumaPesos) * 100) / 100
+              : null;
 
-          listaCalifsActividad.push({
-            alumnoId: alId,
-            actividadId: actividadSeleccionadaId,
-            nota: notaActividad,
-          });
-        }
+            listaCalifsActividad.push({
+              alumnoId: alId,
+              actividadId: actividadSeleccionadaId,
+              nota: notaActividad,
+            });
+          }
 
-        const resActividad = await guardarCalificacionesEvaluacion(
-          grupoId,
-          calificaciones,
-          listaCalifsActividad
-        );
+          const resActividad = await guardarCalificacionesEvaluacion(
+            grupoId,
+            calificaciones,
+            listaCalifsActividad
+          );
 
-        if (resActividad.success) {
-          onUpdateCalificaciones(resActividad.calificaciones);
+          if (resActividad.success) {
+            onUpdateCalificaciones(resActividad.calificaciones);
+          }
+        } catch (actErr: any) {
+          console.warn('[RubricaEvaluacionModal] Error al sincronizar nota general de la actividad:', actErr);
+          avisoActividad = actErr?.message || 'No se pudo sincronizar la nota general de la actividad';
         }
       }
 
@@ -502,9 +592,15 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
           ? `${alumnosAGuardarIds.length} alumnos`
           : alumnoActual?.nombre || 'alumno';
 
-      setMensajeExito(
-        `¡Calificaciones de la rúbrica guardadas y sincronizadas con éxito para ${nombreMsg}!`
-      );
+      if (avisoActividad) {
+        setMensajeExito(
+          `¡Calificaciones de apartados guardadas para ${nombreMsg}! (Advertencia: ${avisoActividad})`
+        );
+      } else {
+        setMensajeExito(
+          `¡Calificaciones de la rúbrica guardadas y sincronizadas con éxito para ${nombreMsg}!`
+        );
+      }
 
       if (autoAvanzar && modo === 'individual') {
         setTimeout(() => {
@@ -876,7 +972,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {apartadosEvaluables.map((item) => {
-                  const notaActual = calificacionesEdicion[item.apartadoId];
+                  const notaActual = calificacionesEdicion[item.edicionKey];
                   const tieneNota = notaActual !== null && notaActual !== undefined && !isNaN(notaActual);
 
                   // Buscar descriptor correspondiente al nivel seleccionado si existe
@@ -893,7 +989,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
 
                   return (
                     <tr
-                      key={item.apartadoId}
+                      key={item.edicionKey}
                       className="hover:bg-slate-50/70 transition-colors"
                     >
                       {/* 1. Columna Número del Apartado */}
@@ -914,7 +1010,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
                                 <button
                                   key={btn.valor}
                                   type="button"
-                                  onClick={() => handleTogglePuntuacion(item.apartadoId, btn.valor)}
+                                  onClick={() => handleTogglePuntuacion(item.edicionKey, btn.valor)}
                                   className={`w-9 h-8 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center justify-center ${
                                     isSelected
                                       ? btn.active

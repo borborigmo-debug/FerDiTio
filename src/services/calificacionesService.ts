@@ -5,6 +5,7 @@
 
 import { Calificacion, CalificacionApartado } from '../types';
 import { getCurrentIdToken } from './authService';
+import { isValidUuid } from '../utils/rubricaUtils';
 
 export interface GuardarCalificacionesPayload {
   grupoId: string;
@@ -396,8 +397,8 @@ export async function guardarCalificacionesApartados(
     if (!item.alumnoId || typeof item.alumnoId !== 'string') {
       throw new Error('Identificador de alumno no válido en la calificación del apartado.');
     }
-    if (!item.apartadoId || typeof item.apartadoId !== 'string') {
-      throw new Error('Identificador UUID de apartado no válido.');
+    if (!item.apartadoId || typeof item.apartadoId !== 'string' || !isValidUuid(item.apartadoId)) {
+      throw new Error(`Identificador UUID de apartado no válido ('${item.apartadoId}'). Todos los apartados deben poseer un UUID persistente verificado.`);
     }
     if (!item.rubricaId || typeof item.rubricaId !== 'string') {
       throw new Error('Identificador de rúbrica no válido.');

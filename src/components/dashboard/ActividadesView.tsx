@@ -22,7 +22,8 @@ import {
   Award,
   Filter,
 } from 'lucide-react';
-import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion } from '../../types';
+import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion, CalificacionApartado } from '../../types';
+import { normalizeRubrica, NormalizedRubrica } from '../../utils/rubricaUtils';
 
 export interface EvidenciaItem {
   actividadId: string;
@@ -74,6 +75,10 @@ export const ActividadesView: React.FC = () => {
   const secciones = useMemo(() => cuadernoData?.secciones || [], [cuadernoData?.secciones]);
   const rubricas = useMemo(() => cuadernoData?.rubricas || [], [cuadernoData?.rubricas]);
   const calificaciones = useMemo(() => cuadernoData?.calificaciones || [], [cuadernoData?.calificaciones]);
+  const calificacionesApartados = useMemo(
+    () => cuadernoData?.calificacionesApartados || [],
+    [cuadernoData?.calificacionesApartados]
+  );
 
   // Si no hay secciones disponibles en el grupo, forzar Caso A por defecto
   useEffect(() => {
@@ -97,6 +102,42 @@ export const ActividadesView: React.FC = () => {
   const seccionesMap = useMemo(() => {
     return new Map<string, Seccion>(secciones.map((s) => [s.id, s]));
   }, [secciones]);
+
+  const actividadesMap = useMemo(() => {
+    return new Map<string, ActividadDetalle>(actividades.map((a) => [a.id, a]));
+  }, [actividades]);
+
+  // Rúbricas normalizadas para acceso directo a apartados, UUIDs, descriptores y criterios vinculados
+  const rubricasNormalizadasMap = useMemo(() => {
+    const map = new Map<string, NormalizedRubrica>();
+    for (const r of rubricas) {
+      if (r && r.id) {
+        map.set(r.id, normalizeRubrica(r));
+      }
+    }
+    return map;
+  }, [rubricas]);
+
+  // Deduplicación determinista de calificaciones de apartados para evitar duplicidades
+  const calificacionesApartadosUnicas = useMemo(() => {
+    const map = new Map<string, CalificacionApartado>();
+    for (const ca of calificacionesApartados) {
+      if (ca && ca.alumno_id && ca.rubrica_id && ca.apartado_id) {
+        const key = `${ca.alumno_id}_${ca.actividad_id || ''}_${ca.rubrica_id}_${ca.apartado_id}`;
+        const existing = map.get(key);
+        if (!existing) {
+          map.set(key, ca);
+        } else if (ca.updated_at && existing.updated_at) {
+          if (new Date(ca.updated_at).getTime() >= new Date(existing.updated_at).getTime()) {
+            map.set(key, ca);
+          }
+        } else {
+          map.set(key, ca);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [calificacionesApartados]);
 
   const calificacionesMap = useMemo(() => {
     const map = new Map<string, Calificacion>();
@@ -171,8 +212,78 @@ export const ActividadesView: React.FC = () => {
     const codNormalizado = criterioCodigo.trim().toLowerCase();
     const evidencias: EvidenciaItem[] = [];
 
-    // Actividades que evalúan este criterio
+    // 1.1. Evidencias procedentes de calificaciones_apartados (rúbricas)
+    for (const ca of calificacionesApartadosUnicas) {
+      if (ca.alumno_id !== alumnoId) continue;
+      // Excluir notas pendientes (null o undefined). El 0 es una calificación válida.
+      if (ca.nota === null || ca.nota === undefined || isNaN(Number(ca.nota))) {
+        continue;
+      }
+
+      const rubricaNorm = rubricasNormalizadasMap.get(ca.rubrica_id);
+      if (!rubricaNorm) continue;
+
+      // Localizar el apartado correspondiente en la rúbrica normalizada
+      const apartado = rubricaNorm.items.find(
+        (it) =>
+          (it.uuid && it.uuid === ca.apartado_id) ||
+          it.id === ca.apartado_id ||
+          (it.legacyId && it.legacyId === ca.apartado_id)
+      );
+
+      if (!apartado) continue;
+
+      // Comprobar si este apartado evalúa el criterio solicitado
+      const evaluaCriterio =
+        Array.isArray(apartado.criterios) &&
+        apartado.criterios.some((c) => c.trim().toLowerCase() === codNormalizado);
+
+      if (!evaluaCriterio) continue;
+
+      // Resolver metadatos de la actividad asociada si existe
+      const act = ca.actividad_id ? actividadesMap.get(ca.actividad_id) : null;
+
+      // Filtrado por período si se especifica y no es 'Global'
+      if (filtroPeriodo && filtroPeriodo !== 'Global') {
+        if (act) {
+          const pNorm = normalizarPeriodo(act.evaluacion_periodo);
+          if (pNorm && pNorm !== filtroPeriodo) {
+            continue;
+          }
+        }
+      }
+
+      const tituloApartado = apartado.titulo?.trim() || (apartado.numero ? `Apartado ${apartado.numero}` : '');
+      const nombreInstrumento = `Rúbrica: ${rubricaNorm.titulo}${tituloApartado ? ` — ${tituloApartado}` : ''}`;
+      const nombreActividad = act?.nombre || rubricaNorm.titulo;
+      const fecha = formatearFechaEvaluacion(ca.updated_at, act?.evaluacion_periodo);
+
+      evidencias.push({
+        actividadId: act?.id || ca.rubrica_id,
+        actividadNombre: nombreActividad,
+        fechaEvaluacion: fecha,
+        instrumento: nombreInstrumento,
+        tipoActividad: act?.tipo || 'Rúbrica',
+        metodo: act?.metodo || undefined,
+        nota: Number(ca.nota),
+      });
+    }
+
+    // 1.2. Evidencias procedentes de public.calificaciones
+    // Solo para actividades directas sin rúbrica o sin apartados calificados
     const acts = actividades.filter((act) => {
+      // Si la actividad tiene rúbrica y ya tiene calificaciones de apartados para este alumno, no duplicar con la nota agregada
+      if (act.rubrica_id) {
+        const tieneApartadosEvaluados = calificacionesApartadosUnicas.some(
+          (ca) =>
+            ca.alumno_id === alumnoId &&
+            ca.actividad_id === act.id &&
+            ca.nota !== null &&
+            ca.nota !== undefined
+        );
+        if (tieneApartadosEvaluados) return false;
+      }
+
       const tieneCriterio =
         Array.isArray(act.criteriosCodigos) &&
         act.criteriosCodigos.some((c) => c.trim().toLowerCase() === codNormalizado);

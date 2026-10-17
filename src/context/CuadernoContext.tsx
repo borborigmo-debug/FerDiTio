@@ -6,7 +6,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { GrupoDocente, fetchGruposDocente, fetchCuadernoGrupo } from '../services/gruposService';
-import { CuadernoGrupoData, Calificacion, CalificacionApartado } from '../types';
+import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica } from '../types';
 
 export type EvaluacionPeriodo = '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
 export type NavTab = 'actividades' | 'rubricas' | 'filtro' | 'resultados' | 'configuracion';
@@ -43,6 +43,7 @@ interface CuadernoContextValue {
   updateCuadernoData: (newData: CuadernoGrupoData) => void;
   updateCalificaciones: (calificaciones: Calificacion[]) => void;
   updateCalificacionesApartados: (apartados: CalificacionApartado[]) => void;
+  updateRubrica: (rubrica: Rubrica) => void;
 
   // Control de cambios no guardados
   hasUnsavedChanges: boolean;
@@ -374,6 +375,22 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
+  const updateRubrica = useCallback(
+    (rubricaActualizada: Rubrica) => {
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        const rubricasActualizadas = (prev.rubricas || []).map((r) =>
+          r.id === rubricaActualizada.id ? rubricaActualizada : r
+        );
+        return {
+          ...prev,
+          rubricas: rubricasActualizadas,
+        };
+      });
+    },
+    []
+  );
+
   const selectedGrupo = grupos.find((g) => g.id === selectedGrupoId) || null;
 
   return (
@@ -399,6 +416,7 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateCuadernoData,
         updateCalificaciones,
         updateCalificacionesApartados,
+        updateRubrica,
 
         hasUnsavedChanges,
         setHasUnsavedChanges,
@@ -434,6 +452,7 @@ export function useCuaderno(): CuadernoContextValue {
       updateCuadernoData: () => {},
       updateCalificaciones: () => {},
       updateCalificacionesApartados: () => {},
+      updateRubrica: () => {},
       hasUnsavedChanges: false,
       setHasUnsavedChanges: () => {},
       connectionInfo: {

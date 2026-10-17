@@ -8,6 +8,7 @@ import { Rubrica, Criterio, ActividadDetalle, Alumno, Calificacion, Calificacion
 import { RubricaDetalle } from './RubricaDetalle';
 import { RubricaEvaluacionModal } from './RubricaEvaluacionModal';
 import { normalizeRubrica } from '../../utils/rubricaUtils';
+import { useCuaderno } from '../../context/CuadernoContext';
 import {
   Table,
   Search,
@@ -47,6 +48,8 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
   onUpdateCalificaciones,
   onUpdateCalificacionesApartados,
 }) => {
+  const { updateRubrica } = useCuaderno();
+
   // Rúbrica seleccionada actualmente para visualización detallada de la matriz
   const [selectedRubricaId, setSelectedRubricaId] = useState<string | null>(
     initialRubricaId || (rubricas.length === 1 ? rubricas[0].id : null)
@@ -285,6 +288,12 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
           calificacionesApartados={calificacionesApartados}
           grupoId={grupoId}
           onClose={() => setRubricaEvaluando(null)}
+          onUpdateRubrica={(rubricaActualizada) => {
+            setRubricaEvaluando(rubricaActualizada);
+            if (updateRubrica) {
+              updateRubrica(rubricaActualizada);
+            }
+          }}
           onUpdateCalificaciones={(nuevasCalifs) => {
             if (onUpdateCalificaciones) {
               onUpdateCalificaciones(nuevasCalifs);

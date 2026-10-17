@@ -218,6 +218,85 @@ serve(async (req: Request) => {
         );
       }
 
+      // Comprobación de si es petición para actualizar apartados de una rúbrica
+      const isActualizarRubrica = body?.tipo === 'actualizar_rubrica' 
+        || body?.tipo === 'rubrica'
+        || url.pathname.includes('/rubricas');
+
+      if (isActualizarRubrica) {
+        const rubricaId = typeof body?.rubricaId === 'string' ? body.rubricaId.trim() : '';
+        if (!rubricaId) {
+          return new Response(
+            JSON.stringify({ error: "Parámetro obligatorio 'rubricaId' no proporcionado." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const rawItems = Array.isArray(body?.items) ? body.items : null;
+        if (!rawItems) {
+          return new Response(
+            JSON.stringify({ error: "El parámetro 'items' debe ser un array de apartados." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Verificación de propiedad del grupo
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Verificar que la rúbrica pertenece al grupo
+        const { data: rubricaExistente, error: rubError } = await supabase
+          .from("rubricas")
+          .select("id, grupo_id")
+          .eq("id", rubricaId)
+          .eq("grupo_id", grupo.id)
+          .maybeSingle();
+
+        if (rubError || !rubricaExistente) {
+          return new Response(
+            JSON.stringify({ error: "La rúbrica no existe o no pertenece al grupo especificado." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Actualizar los items de la rúbrica con los UUIDs persistentes
+        const { data: rubricaActualizada, error: updateError } = await supabase
+          .from("rubricas")
+          .update({
+            items: rawItems,
+          })
+          .eq("id", rubricaId)
+          .eq("grupo_id", grupo.id)
+          .select()
+          .maybeSingle();
+
+        if (updateError) {
+          return new Response(
+            JSON.stringify({ error: `Error al actualizar la rúbrica: ${updateError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            rubrica: rubricaActualizada,
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       // Comprobación de si es petición para calificaciones de apartados
       const isApartados = body?.tipo === 'apartados' 
         || Boolean(body?.calificacionesApartados) 
@@ -692,16 +771,210 @@ serve(async (req: Request) => {
         actividad_id: item.actividadId,
       }));
 
-      const { data: rpcResult, error: rpcError } = await supabase.rpc(
-        "persistir_calificaciones_lote",
-        {
-          p_grupo_id: grupo.id,
-          p_guardar: payloadGuardar,
-          p_retirar: payloadRetirar,
-        }
+      let rpcResult: any = null;
+      let rpcError: any = null;
+
+      try {
+        const res = await supabase.rpc(
+          "persistir_calificaciones_lote",
+          {
+            p_grupo_id: grupo.id,
+            p_guardar: payloadGuardar,
+            p_retirar: payloadRetirar,
+          }
+        );
+        rpcResult = res.data;
+        rpcError = res.error;
+      } catch (e) {
+        rpcError = e;
+      }
+
+      // Solo activar fallback si se confirma formalmente que la función RPC no existe en Supabase
+      const errCode = String(rpcError?.code || "").trim().toUpperCase();
+      const errMsg = typeof rpcError?.message === "string" ? rpcError.message.toLowerCase() : "";
+      const errDetails = typeof rpcError?.details === "string" ? rpcError.details.toLowerCase() : "";
+      const errHint = typeof rpcError?.hint === "string" ? rpcError.hint.toLowerCase() : "";
+      const rawErrStr = String(rpcError || "").toLowerCase();
+      const combinedText = `${errMsg} ${errDetails} ${errHint} ${rawErrStr}`;
+
+      const mentionsRpc = combinedText.includes("persistir_calificaciones_lote");
+      const isSchemaCacheMissing =
+        combinedText.includes("could not find the function") &&
+        combinedText.includes("schema cache");
+      const isExplicitMissingMsg =
+        mentionsRpc &&
+        (combinedText.includes("does not exist") ||
+          combinedText.includes("no existe la función") ||
+          combinedText.includes("undefined function") ||
+          combinedText.includes("not found"));
+
+      const isMissingRpc = Boolean(
+        rpcError &&
+          (errCode === "42883" || // PostgreSQL: undefined_function
+            errCode === "PGRST202" || // PostgREST: function not found in schema cache
+            isSchemaCacheMissing || // Mensaje estándar de PostgREST schema cache
+            isExplicitMissingMsg) // Mensaje inequívoco de función persistir_calificaciones_lote inexistente
       );
 
-      if (rpcError) {
+      if (isMissingRpc) {
+        // Fallback directo sobre public.calificaciones (con validación de pertenencia al grupo ya superada).
+        // AVISO TÉCNICO: Este fallback realiza peticiones individuales directas y NO garantiza atomicidad de transacción.
+        let retiradasContador = 0;
+        let guardadasContador = 0;
+
+        if (payloadRetirar.length > 0) {
+          for (let i = 0; i < payloadRetirar.length; i++) {
+            const ret = payloadRetirar[i];
+            const { error: delError } = await supabase
+              .from("calificaciones")
+              .delete()
+              .eq("grupo_id", grupo.id)
+              .eq("alumno_id", ret.alumno_id)
+              .eq("actividad_id", ret.actividad_id);
+
+            if (delError) {
+              console.error("[fernanditio-data] Fallback error al retirar calificación:", delError);
+              return new Response(
+                JSON.stringify({
+                  error: `Error al retirar calificación en Supabase: ${delError.message || delError.code || "Fallo en operación de borrado"}`,
+                  code: delError.code,
+                  operacion: "delete",
+                  indice: i,
+                  completadasParciales: {
+                    retiradas: retiradasContador,
+                    guardadas: guardadasContador,
+                  },
+                  esAtomico: false,
+                }),
+                { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+            retiradasContador++;
+          }
+        }
+
+        if (payloadGuardar.length > 0) {
+          for (let i = 0; i < payloadGuardar.length; i++) {
+            const g = payloadGuardar[i];
+            const { data: existingRow, error: selectError } = await supabase
+              .from("calificaciones")
+              .select("id")
+              .eq("grupo_id", grupo.id)
+              .eq("alumno_id", g.alumno_id)
+              .eq("actividad_id", g.actividad_id)
+              .maybeSingle();
+
+            if (selectError) {
+              console.error("[fernanditio-data] Fallback error al consultar existencia previa de calificación:", selectError);
+              return new Response(
+                JSON.stringify({
+                  error: `Error al verificar calificación previa en Supabase: ${selectError.message || selectError.code || "Fallo en verificación"}`,
+                  code: selectError.code,
+                  operacion: "select",
+                  indice: i,
+                  completadasParciales: {
+                    retiradas: retiradasContador,
+                    guardadas: guardadasContador,
+                  },
+                  esAtomico: false,
+                }),
+                { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+
+            if (existingRow?.id) {
+              const { error: updateError } = await supabase
+                .from("calificaciones")
+                .update({
+                  nota: g.nota,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", existingRow.id);
+
+              if (updateError) {
+                console.error("[fernanditio-data] Fallback error al actualizar calificación:", updateError);
+                return new Response(
+                  JSON.stringify({
+                    error: `Error al actualizar calificación en Supabase: ${updateError.message || updateError.code || "Fallo en operación de actualización"}`,
+                    code: updateError.code,
+                    operacion: "update",
+                    indice: i,
+                    completadasParciales: {
+                      retiradas: retiradasContador,
+                      guardadas: guardadasContador,
+                    },
+                    esAtomico: false,
+                  }),
+                  { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+            } else {
+              const { error: insertError } = await supabase
+                .from("calificaciones")
+                .insert({
+                  grupo_id: grupo.id,
+                  alumno_id: g.alumno_id,
+                  actividad_id: g.actividad_id,
+                  nota: g.nota,
+                  updated_at: new Date().toISOString(),
+                });
+
+              if (insertError) {
+                console.error("[fernanditio-data] Fallback error al insertar calificación:", insertError);
+                return new Response(
+                  JSON.stringify({
+                    error: `Error al insertar calificación en Supabase: ${insertError.message || insertError.code || "Fallo en operación de inserción"}`,
+                    code: insertError.code,
+                    operacion: "insert",
+                    indice: i,
+                    completadasParciales: {
+                      retiradas: retiradasContador,
+                      guardadas: guardadasContador,
+                    },
+                    esAtomico: false,
+                  }),
+                  { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+            }
+            guardadasContador++;
+          }
+        }
+
+        const { data: allCalificaciones, error: fetchError } = await supabase
+          .from("calificaciones")
+          .select("*")
+          .eq("grupo_id", grupo.id);
+
+        if (fetchError) {
+          console.error("[fernanditio-data] Fallback error al recuperar calificaciones finales:", fetchError);
+          return new Response(
+            JSON.stringify({
+              error: `Las operaciones individuales finalizaron pero falló la consulta final de calificaciones: ${fetchError.message || fetchError.code || "Fallo de consulta"}`,
+              code: fetchError.code,
+              operacion: "select_all",
+              completadasParciales: {
+                retiradas: retiradasContador,
+                guardadas: guardadasContador,
+              },
+              esAtomico: false,
+            }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            guardadas: payloadGuardar.length,
+            retiradas: payloadRetirar.length,
+            actualizadas: payloadGuardar.length + payloadRetirar.length,
+            calificaciones: allCalificaciones || [],
+            esAtomico: false,
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      } else if (rpcError) {
         console.error("[fernanditio-data] Error en RPC persistir_calificaciones_lote:", rpcError);
         return new Response(
           JSON.stringify({ error: `Error atómico al persistir calificaciones en Supabase: ${rpcError.message}` }),
