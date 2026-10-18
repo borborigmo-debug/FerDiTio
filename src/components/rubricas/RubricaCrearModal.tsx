@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useId } from 'react';
+import React, { useState, useId, useRef, useEffect } from 'react';
 import { Criterio, Rubrica, ActividadDetalle } from '../../types';
 import { EvaluacionPeriodo } from '../../context/CuadernoContext';
-import { crearRubricaYActividad } from '../../services/rubricasService';
+import { crearRubricaYActividad, analizarRubricaConGemini, BorradorRubricaGemini } from '../../services/rubricasService';
+import { optimizeImageForGemini, extractDocxTextAndTables } from '../../utils/geminiRubricaImportUtils';
 import { generateUuid } from '../../utils/rubricaUtils';
 import {
   X,
@@ -22,6 +23,11 @@ import {
   Layers,
   ChevronDown,
   ChevronUp,
+  Camera,
+  FileText,
+  Upload,
+  Loader2,
+  HelpCircle,
 } from 'lucide-react';
 
 export type TipoRubricaCrear = 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
@@ -32,11 +38,18 @@ interface ApartadoFormState {
   titulo: string;
   peso: number | null;
   criterios: string[];
+  descriptores?: {
+    "1": string;
+    "2": string;
+    "3": string;
+    "4": string;
+  };
 }
 
 interface RubricaCrearModalProps {
   grupoId: string;
   tipoInicial: TipoRubricaCrear;
+  origenInicial?: 'foto' | 'word' | null;
   periodoInicial?: EvaluacionPeriodo;
   criterios: Criterio[];
   onClose: () => void;
@@ -46,6 +59,7 @@ interface RubricaCrearModalProps {
 export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   grupoId,
   tipoInicial,
+  origenInicial = null,
   periodoInicial = '1.º Ev',
   criterios,
   onClose,
@@ -67,6 +81,25 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [mostrarOpcionesAvanzadas, setMostrarOpcionesAvanzadas] = useState(false);
+
+  // Estados de la Asistencia con Gemini (Foto / Word)
+  const [isAnalyzingWithGemini, setIsAnalyzingWithGemini] = useState(false);
+  const [analisisMessage, setAnalisisMessage] = useState<string | null>(null);
+  const [analisisSuccessMessage, setAnalisisSuccessMessage] = useState<string | null>(null);
+  const [analisisError, setAnalisisError] = useState<string | null>(null);
+
+  // Referencias a inputs ocultos de archivos
+  const fileInputFotoRef = useRef<HTMLInputElement>(null);
+  const fileInputWordRef = useRef<HTMLInputElement>(null);
+
+  // Disparo automático si se solicitó origen asistido al abrir
+  useEffect(() => {
+    if (origenInicial === 'foto') {
+      setTimeout(() => fileInputFotoRef.current?.click(), 100);
+    } else if (origenInicial === 'word') {
+      setTimeout(() => fileInputWordRef.current?.click(), 100);
+    }
+  }, [origenInicial]);
 
   // Períodos válidos admitidos por el modelo y la base de datos
   const periodosValidos: EvaluacionPeriodo[] = ['1.º Ev', '2.º Ev', '3.º Ev', 'Global'];
@@ -131,6 +164,99 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     setApartados((prev) => prev.map((a) => (a.id === id ? { ...a, ...updates } : a)));
   };
 
+  // Aplicar borrador recibido de Gemini a los estados del formulario para revisión humana
+  const aplicarBorradorGemini = (borrador: BorradorRubricaGemini, nombreOrigen: string) => {
+    if (borrador.titulo) setTitulo(borrador.titulo);
+    if (borrador.tipo) setTipo(borrador.tipo);
+    if (borrador.descripcion) setDescripcion(borrador.descripcion);
+
+    const codigosAsociados = new Set<string>();
+    const apartadosFormateados: ApartadoFormState[] = (borrador.items || []).map((it, idx) => {
+      (it.criterios || []).forEach((c) => codigosAsociados.add(c));
+      return {
+        id: it.id || generateUuid().toLowerCase(),
+        numero: it.numero || String(idx + 1),
+        titulo: it.titulo,
+        peso: it.peso,
+        criterios: it.criterios || [],
+        descriptores: it.descriptores,
+      };
+    });
+
+    setApartados(apartadosFormateados);
+    setCriteriosSeleccionados(Array.from(codigosAsociados));
+
+    const sinCriterio = apartadosFormateados.filter((a) => a.criterios.length === 0).length;
+    if (sinCriterio > 0) {
+      setAnalisisSuccessMessage(
+        `Rúbrica analizada con éxito desde "${nombreOrigen}". Se generaron ${apartadosFormateados.length} apartados (${sinCriterio} con criterio pendiente de selección manual). Revisa y edita los datos antes de guardar.`
+      );
+    } else {
+      setAnalisisSuccessMessage(
+        `Rúbrica analizada con éxito desde "${nombreOrigen}". Se generaron ${apartadosFormateados.length} apartados vinculados con los criterios del grupo. Revisa y edita los datos antes de guardar.`
+      );
+    }
+  };
+
+  // Manejador para fotografía (cámara o selección de archivo)
+  const handleFotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    setIsAnalyzingWithGemini(true);
+    setAnalisisError(null);
+    setAnalisisSuccessMessage(null);
+    setAnalisisMessage(`Optimizando fotografía (${file.name}) y analizando con Gemini...`);
+
+    try {
+      const { base64, mimeType } = await optimizeImageForGemini(file);
+      setAnalisisMessage('Gemini está estructurando la rúbrica y contrastando contra los criterios oficiales del grupo...');
+      const borrador = await analizarRubricaConGemini({
+        grupoId,
+        origen: 'foto',
+        imagenBase64: base64,
+        mimeType,
+      });
+      aplicarBorradorGemini(borrador, file.name);
+    } catch (err: any) {
+      console.error('[RubricaCrearModal] Error en análisis de foto con Gemini:', err);
+      setAnalisisError(err?.message || 'Error al analizar la fotografía de la rúbrica con Gemini.');
+    } finally {
+      setIsAnalyzingWithGemini(false);
+      setAnalisisMessage(null);
+    }
+  };
+
+  // Manejador para documento Word (.docx)
+  const handleWordSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    setIsAnalyzingWithGemini(true);
+    setAnalisisError(null);
+    setAnalisisSuccessMessage(null);
+    setAnalisisMessage(`Extrayendo texto y tablas de "${file.name}"...`);
+
+    try {
+      const textoDocx = await extractDocxTextAndTables(file);
+      setAnalisisMessage('Gemini está analizando la matriz de Word y contrastando contra los criterios oficiales del grupo...');
+      const borrador = await analizarRubricaConGemini({
+        grupoId,
+        origen: 'word',
+        documentoTexto: textoDocx,
+      });
+      aplicarBorradorGemini(borrador, file.name);
+    } catch (err: any) {
+      console.error('[RubricaCrearModal] Error en análisis de Word con Gemini:', err);
+      setAnalisisError(err?.message || 'Error al analizar el documento Word de la rúbrica con Gemini.');
+    } finally {
+      setIsAnalyzingWithGemini(false);
+      setAnalisisMessage(null);
+    }
+  };
+
   // Envío del formulario con persistencia confirmada en Supabase
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -169,7 +295,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           titulo: a.titulo.trim(),
           peso: a.peso,
           criterios: a.criterios,
-          descriptores: {
+          descriptores: a.descriptores || {
             '1': 'Inicial / Insuficiente',
             '2': 'En proceso / Suficiente',
             '3': 'Conseguido / Notable',
@@ -256,6 +382,101 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
         {/* Contenido con Scroll */}
         <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-5 text-slate-800 text-xs">
+          {/* Inputs ocultos de archivo para fotografía y documento Word */}
+          <input
+            ref={fileInputFotoRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={handleFotoSelect}
+          />
+          <input
+            ref={fileInputWordRef}
+            type="file"
+            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            className="hidden"
+            onChange={handleWordSelect}
+          />
+
+          {/* ========================================================
+              0. ASISTENTE INTELIGENTE CON GEMINI (FOTO Y WORD)
+              ======================================================== */}
+          <div className="p-3.5 bg-gradient-to-r from-indigo-50/90 via-purple-50/80 to-sky-50/90 border border-indigo-200/90 rounded-xl space-y-2.5 shadow-2xs">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-indigo-600 text-white flex items-center justify-center shadow-2xs">
+                  <Sparkles className="w-3.5 h-3.5" />
+                </div>
+                <span className="font-bold text-indigo-950 text-xs">
+                  Creación Asistida con Gemini
+                </span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                  Castilla y León
+                </span>
+              </div>
+              <span className="text-[10px] text-indigo-700 font-medium">
+                {criterios.length} criterios oficiales en este grupo
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-600 leading-snug">
+              Analiza una rúbrica a partir de una <strong>fotografía</strong> o un archivo <strong>Word (.docx)</strong>. Gemini extraerá apartados, pesos y niveles vinculándolos exclusivamente con los criterios oficiales de este grupo.
+            </p>
+
+            {/* Botones de acción asistida */}
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={() => fileInputFotoRef.current?.click()}
+                disabled={isAnalyzingWithGemini || isSubmitting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                title="Tomar foto con la cámara del dispositivo o subir imagen"
+              >
+                <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Fotografía / Cámara</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => fileInputWordRef.current?.click()}
+                disabled={isAnalyzingWithGemini || isSubmitting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                title="Importar archivo Word (.docx) con matriz o tabla de rúbrica"
+              >
+                <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Documento Word (.docx)</span>
+              </button>
+            </div>
+
+            {/* Estado de análisis en curso */}
+            {isAnalyzingWithGemini && (
+              <div className="p-2.5 bg-indigo-100/90 border border-indigo-300 rounded-lg text-indigo-950 flex items-center gap-2 animate-pulse">
+                <Loader2 className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
+                <span className="font-medium text-xs">{analisisMessage || 'Analizando rúbrica con Gemini...'}</span>
+              </div>
+            )}
+
+            {/* Alerta de error en análisis */}
+            {analisisError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2 animate-in fade-in">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="flex-1 text-xs">
+                  <strong className="block font-semibold">Error al procesar con Gemini:</strong>
+                  <span>{analisisError}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Notificación de éxito en análisis */}
+            {analisisSuccessMessage && (
+              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 flex items-start gap-2 animate-in fade-in">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="flex-1 text-xs font-medium">{analisisSuccessMessage}</div>
+              </div>
+            )}
+          </div>
+
           {/* Mensaje de error general si falla */}
           {errorMessage && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 flex items-start gap-2 animate-in fade-in">
@@ -458,7 +679,11 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                 {apartados.map((ap) => (
                   <div
                     key={ap.id}
-                    className="p-2.5 rounded-lg border border-slate-200 bg-white hover:border-slate-300 shadow-2xs space-y-2"
+                    className={`p-2.5 rounded-lg border shadow-2xs space-y-2 transition-all ${
+                      ap.criterios.length === 0
+                        ? 'border-amber-300 bg-amber-50/40 hover:border-amber-400'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 flex-1">
@@ -470,7 +695,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                           value={ap.titulo}
                           onChange={(e) => handleUpdateApartado(ap.id, { titulo: e.target.value })}
                           placeholder="Título del apartado..."
-                          className="flex-1 px-2 py-1 text-xs border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-medium"
+                          className="flex-1 px-2 py-1 text-xs border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-medium bg-white"
                         />
                       </div>
 
@@ -488,7 +713,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                               handleUpdateApartado(ap.id, { peso: val });
                             }}
                             placeholder="%"
-                            className="w-14 px-1.5 py-0.5 text-xs text-right border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-mono"
+                            className="w-14 px-1.5 py-0.5 text-xs text-right border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-mono bg-white"
                           />
                         </div>
 
@@ -502,6 +727,14 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                         </button>
                       </div>
                     </div>
+
+                    {/* Advertencia si no tiene criterio asignado */}
+                    {ap.criterios.length === 0 && (
+                      <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-100/90 border border-amber-300 text-amber-900 text-[10px] font-medium animate-in fade-in">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>Sin criterio asignado. Pulsa sobre el código correspondiente abajo para vincularlo:</span>
+                      </div>
+                    )}
 
                     {/* Criterios asociados a este apartado específico */}
                     <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 pt-1 border-t border-slate-50">

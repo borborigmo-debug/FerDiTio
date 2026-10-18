@@ -228,9 +228,104 @@ export async function crearRubricaYActividad(
 
   const actividadRetornada: ActividadDetalle = data.actividad;
 
-  return {
+    return {
     success: true,
     rubrica: rubricaRetornada,
     actividad: actividadRetornada,
   };
 }
+
+export interface AnalisisRubricaGeminiParams {
+  grupoId: string;
+  origen: 'foto' | 'word';
+  imagenBase64?: string;
+  mimeType?: string;
+  documentoTexto?: string;
+}
+
+export interface ApartadoBorradorGemini {
+  id: string;
+  numero: string;
+  titulo: string;
+  peso: number | null;
+  criterios: string[];
+  criteriosPendientes: boolean;
+  descriptores: {
+    "1": string;
+    "2": string;
+    "3": string;
+    "4": string;
+  };
+}
+
+export interface BorradorRubricaGemini {
+  titulo: string;
+  tipo: 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
+  descripcion: string | null;
+  items: ApartadoBorradorGemini[];
+  totalCriteriosDisponibles: number;
+}
+
+/**
+ * Invoca el análisis asistido de rúbricas mediante Gemini a partir de foto o Word.
+ * La llamada al backend se realiza de forma autenticada con token Firebase, verificando
+ * en el servidor los criterios oficiales del grupo y depurando alucinaciones de la IA.
+ */
+export async function analizarRubricaConGemini(
+  params: AnalisisRubricaGeminiParams
+): Promise<BorradorRubricaGemini> {
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión autenticada activa para comunicarse con el servidor.');
+  }
+
+  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: 'analizar_rubrica_gemini',
+        grupoId: params.grupoId,
+        origen: params.origen,
+        imagenBase64: params.imagenBase64,
+        mimeType: params.mimeType,
+        documentoTexto: params.documentoTexto,
+      }),
+    });
+  } catch (err: any) {
+    throw new Error(`Error de red al conectar con el servicio de análisis: ${err?.message || 'Fallo de conexión'}`);
+  }
+
+  if (!response.ok) {
+    let detalleError = `HTTP ${response.status}: ${response.statusText}`;
+    try {
+      const errorJson = await response.json();
+      if (errorJson?.error) {
+        detalleError = errorJson.error;
+      }
+    } catch {
+      // Ignorar
+    }
+    throw new Error(detalleError);
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Respuesta malformada del servidor al recibir el análisis de Gemini.');
+  }
+
+  if (!data?.success || !data?.borrador) {
+    throw new Error(data?.error || 'No se pudo obtener el borrador estructurado de la rúbrica.');
+  }
+
+  return data.borrador;
+}
+

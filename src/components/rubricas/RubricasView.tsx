@@ -26,6 +26,8 @@ import {
   FolderGit2,
   GraduationCap,
   Plus,
+  Camera,
+  Sparkles,
 } from 'lucide-react';
 
 interface RubricasViewProps {
@@ -65,6 +67,12 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
 
   // Modal de creación de rúbrica (tipo seleccionado para crear: ACTIVIDAD | TRABAJO | EXAMEN)
   const [tipoModalCrear, setTipoModalCrear] = useState<TipoRubricaCrear | null>(null);
+  const [origenModalCrear, setOrigenModalCrear] = useState<'foto' | 'word' | null>(null);
+
+  const handleOpenCrear = (tipo: TipoRubricaCrear, origen?: 'foto' | 'word') => {
+    setTipoModalCrear(tipo);
+    setOrigenModalCrear(origen || null);
+  };
 
   // Filtro de búsqueda entre las rúbricas del grupo
   const [searchRubricaQuery, setSearchRubricaQuery] = useState('');
@@ -137,11 +145,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             </p>
           </div>
 
-          {/* Los tres botones de creación de rúbricas obligatorios */}
+          {/* Los tres botones de creación de rúbricas obligatorios + Asistente Gemini */}
           <div className="flex flex-wrap items-center gap-2 self-start lg:self-center">
             <button
               type="button"
-              onClick={() => setTipoModalCrear('ACTIVIDAD')}
+              onClick={() => handleOpenCrear('ACTIVIDAD')}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
               title="Crear nueva rúbrica para una actividad cotidiana o tarea evaluable"
             >
@@ -151,7 +159,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
 
             <button
               type="button"
-              onClick={() => setTipoModalCrear('TRABAJO')}
+              onClick={() => handleOpenCrear('TRABAJO')}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 active:bg-sky-200 border border-sky-300 rounded-lg shadow-2xs transition-all cursor-pointer"
               title="Crear nueva rúbrica para un trabajo, proyecto monográfico o producción escrita"
             >
@@ -161,12 +169,36 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
 
             <button
               type="button"
-              onClick={() => setTipoModalCrear('EXAMEN')}
+              onClick={() => handleOpenCrear('EXAMEN')}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-purple-800 bg-purple-50 hover:bg-purple-100 active:bg-purple-200 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
               title="Crear nueva rúbrica para una prueba escrita o examen"
             >
               <GraduationCap className="w-4 h-4 text-purple-600" />
               <span>Crear rúbrica de Examen</span>
+            </button>
+
+            {/* Separador sutil */}
+            <div className="h-6 w-[1px] bg-slate-300 hidden sm:block mx-0.5" />
+
+            {/* Accesos directos a Gemini (Foto y Word) */}
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'foto')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Fotografiar o subir imagen de la rúbrica para estructurarla con Gemini"
+            >
+              <Camera className="w-4 h-4 text-indigo-600" />
+              <span>Desde Foto</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'word')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-sky-50 hover:from-indigo-100 hover:to-sky-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Importar documento Word (.docx) para estructurarlo con Gemini"
+            >
+              <FileText className="w-4 h-4 text-indigo-600" />
+              <span>Desde Word (.docx)</span>
             </button>
           </div>
         </div>
@@ -176,7 +208,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
           2. ESTADO VACÍO (Si aún no hay rúbricas en el grupo)
           ======================================================== */}
       {(!rubricas || rubricas.length === 0) ? (
-        <div className="text-center py-12 px-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 space-y-3">
+        <div className="text-center py-10 px-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 space-y-3.5">
           <div className="w-12 h-12 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center mx-auto shadow-2xs">
             <Table className="w-6 h-6" aria-hidden="true" />
           </div>
@@ -185,8 +217,52 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
               No hay rúbricas registradas en este grupo
             </h3>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Utiliza cualquiera de los tres botones superiores para crear tu primera rúbrica de <strong className="text-emerald-700">Actividad</strong>, <strong className="text-sky-700">Trabajo</strong> o <strong className="text-purple-700">Examen</strong> y vincularla a los criterios del curso.
+              Crea tu primera rúbrica manualmente o utiliza el asistente con Gemini para importar una rúbrica desde fotografía o archivo Word.
             </p>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+            >
+              <FileCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Actividad</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('TRABAJO')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+            >
+              <FolderGit2 className="w-3.5 h-3.5 text-sky-600" />
+              <span>Trabajo</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('EXAMEN')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+            >
+              <GraduationCap className="w-3.5 h-3.5 text-purple-600" />
+              <span>Examen</span>
+            </button>
+            <div className="h-5 w-[1px] bg-slate-300 hidden sm:block mx-1" />
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'foto')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+            >
+              <Camera className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Con Foto (Gemini)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'word')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Con Word (Gemini)</span>
+            </button>
           </div>
         </div>
       ) : (
@@ -359,15 +435,20 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
         <RubricaCrearModal
           grupoId={grupoId}
           tipoInicial={tipoModalCrear}
+          origenInicial={origenModalCrear}
           periodoInicial={selectedEvaluacion || '1.º Ev'}
           criterios={criterios}
-          onClose={() => setTipoModalCrear(null)}
+          onClose={() => {
+            setTipoModalCrear(null);
+            setOrigenModalCrear(null);
+          }}
           onSuccess={(nuevaRubrica, nuevaActividad) => {
             if (addRubricaYActividad) {
               addRubricaYActividad(nuevaRubrica, nuevaActividad);
             }
             setSelectedRubricaId(nuevaRubrica.id);
             setTipoModalCrear(null);
+            setOrigenModalCrear(null);
           }}
         />
       )}

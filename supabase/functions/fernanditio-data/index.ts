@@ -363,6 +363,277 @@ serve(async (req: Request) => {
         );
       }
 
+      // =========================================================================
+      // Comprobación de si es petición para analizar una rúbrica con Gemini (Foto o Word)
+      // =========================================================================
+      const isAnalizarRubricaGemini = body?.tipo === 'analizar_rubrica_gemini';
+      if (isAnalizarRubricaGemini) {
+        // 1. Verificación de pertenencia del grupo al docente autenticado
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id, nombre")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 2. Comprobación del secreto de servidor GEMINI_API_KEY
+        const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+        if (!geminiApiKey) {
+          return new Response(
+            JSON.stringify({
+              error: "El servicio de análisis con Gemini no está configurado (falta el secreto GEMINI_API_KEY en Supabase Edge Functions).",
+              code: "GEMINI_API_KEY_MISSING",
+            }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 3. Recuperar exclusivamente los criterios autorizados del grupo desde la base de datos
+        const { data: criteriosBd, error: critError } = await supabase
+          .from("criterios")
+          .select("id, codigo, descripcion, ponderacion")
+          .eq("grupo_id", targetGrupoId);
+
+        if (critError) {
+          return new Response(
+            JSON.stringify({ error: `Error al consultar los criterios del grupo: ${critError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        if (!criteriosBd || criteriosBd.length === 0) {
+          return new Response(
+            JSON.stringify({
+              error: "El grupo activo no tiene criterios de evaluación registrados. Es imprescindible disponer de criterios oficiales en el grupo antes de analizar y relacionar la rúbrica.",
+              code: "CRITERIOS_EMPTY",
+            }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 4. Parámetros de entrada según origen (fotografía o documento Word)
+        const origen = body?.origen === "word" ? "word" : "foto";
+        const imagenBase64 = typeof body?.imagenBase64 === "string" ? body.imagenBase64.trim() : "";
+        const mimeType = typeof body?.mimeType === "string" && body.mimeType.trim() ? body.mimeType.trim() : "image/jpeg";
+        const documentoTexto = typeof body?.documentoTexto === "string" ? body.documentoTexto.trim() : "";
+
+        if (origen === "foto" && !imagenBase64) {
+          return new Response(
+            JSON.stringify({ error: "No se ha proporcionado la imagen en base64 para el análisis." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        if (origen === "word" && !documentoTexto) {
+          return new Response(
+            JSON.stringify({ error: "No se ha proporcionado el texto o tabla extraída del documento Word para el análisis." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let rawBase64 = imagenBase64;
+        if (rawBase64.includes(",")) {
+          rawBase64 = rawBase64.split(",")[1];
+        }
+
+        // 5. Construcción del prompt estricto con la lista oficial de criterios
+        const listaCriteriosTexto = criteriosBd
+          .map((c: any) => `- Código: "${c.codigo}" | Descripción: "${c.descripcion}"`)
+          .join("\n");
+
+        const promptInstrucciones = `Eres un asistente docente experto en la materia de Lengua Castellana y Literatura para Educación Secundaria y Bachillerato (Castilla y León).
+Tu misión es analizar la rúbrica proporcionada (mediante ${origen === "foto" ? "fotografía de la matriz de evaluación" : "contenido y tablas extraídas de un documento Word"}) y extraer una estructura normalizada de apartados e indicadores.
+
+LISTA OFICIAL DE CRITERIOS DE EVALUACIÓN AUTORIZADOS PARA ESTE GRUPO:
+${listaCriteriosTexto}
+
+REGLAS OBLIGATORIAS:
+1. SOLO puedes asociar a cada apartado códigos que pertenezcan ESTRICTAMENTE a la lista oficial anterior.
+2. Está TERMINANTEMENTE PROHIBIDO inventar códigos, añadir sufijos, cambiar letras o utilizar criterios de otras materias o comunidades autónomas.
+3. Si un apartado o indicador no menciona un criterio explícito o no se puede establecer una relación clara e inequívoca con la lista oficial, DEBES DEVOLVER una lista vacía de criterios para ese apartado: "criterios": []. El docente se encargará de asignarlo manualmente en la pantalla de revisión.
+4. Identifica el título general de la rúbrica y sugiere el tipo evaluativo más apropiado: "ACTIVIDAD", "TRABAJO" o "EXAMEN".
+5. Extrae los apartados evaluables identificados (mínimo 1). Para cada apartado:
+   - "titulo": título claro y conciso del indicador o aspecto evaluado.
+   - "peso": peso porcentual sugerido (1 a 100). Si la rúbrica original no especifica pesos, reparte equitativamente o sugiere un valor coherente.
+   - "criterios": array de códigos oficiales coincidentes (o [] si no hay coincidencia exacta).
+   - "descriptores": objeto con exactamente 4 niveles de desempeño numéricos del '1' al '4':
+       "1": descriptor del nivel Inicial o Insuficiente (calificación 1-4)
+       "2": descriptor del nivel En proceso o Suficiente (calificación 5-6)
+       "3": descriptor del nivel Conseguido o Notable (calificación 7-8)
+       "4": descriptor del nivel Avanzado o Sobresaliente (calificación 9-10)
+   (Si la rúbrica original tiene 3 o 5 niveles, adáptala con criterio pedagógico a estos 4 niveles normalizados de Fernanditio respetando fielmente el texto original).`;
+
+        const parts: any[] = [];
+        if (origen === "foto") {
+          parts.push({
+            inlineData: {
+              mimeType: mimeType,
+              data: rawBase64,
+            },
+          });
+        }
+        parts.push({
+          text: promptInstrucciones + (origen === "word" ? `\n\nCONTENIDO EXTRAÍDO DEL DOCUMENTO WORD:\n${documentoTexto}` : "\n\nAnaliza la fotografía de la rúbrica adjunta y devuelve el JSON estructurado."),
+        });
+
+        const geminiRequestBody = {
+          contents: [
+            {
+              role: "user",
+              parts: parts,
+            },
+          ],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                titulo: { type: "STRING" },
+                tipo: { type: "STRING", enum: ["ACTIVIDAD", "TRABAJO", "EXAMEN"] },
+                descripcion: { type: "STRING" },
+                items: {
+                  type: "ARRAY",
+                  items: {
+                    type: "OBJECT",
+                    properties: {
+                      titulo: { type: "STRING" },
+                      peso: { type: "NUMBER" },
+                      criterios: {
+                        type: "ARRAY",
+                        items: { type: "STRING" },
+                      },
+                      descriptores: {
+                        type: "OBJECT",
+                        properties: {
+                          "1": { type: "STRING" },
+                          "2": { type: "STRING" },
+                          "3": { type: "STRING" },
+                          "4": { type: "STRING" },
+                        },
+                        required: ["1", "2", "3", "4"],
+                      },
+                    },
+                    required: ["titulo", "criterios", "descriptores"],
+                  },
+                },
+              },
+              required: ["titulo", "tipo", "items"],
+            },
+          },
+        };
+
+        // 6. Invocación a Gemini REST API
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
+
+        let geminiRes: Response;
+        try {
+          geminiRes = await fetch(geminiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(geminiRequestBody),
+          });
+        } catch (fetchErr: any) {
+          return new Response(
+            JSON.stringify({ error: `Error de conexión al invocar la API de Gemini: ${fetchErr?.message || fetchErr}` }),
+            { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        if (!geminiRes.ok) {
+          const errText = await geminiRes.text();
+          console.error("[fernanditio-data] Error recibido de Gemini API:", geminiRes.status, errText);
+          return new Response(
+            JSON.stringify({ error: `La API de Gemini rechazó la petición (${geminiRes.status}): ${errText}` }),
+            { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const geminiJson = await geminiRes.json();
+        const rawContentText = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawContentText) {
+          return new Response(
+            JSON.stringify({ error: "La respuesta de Gemini no contuvo texto analizable." }),
+            { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let parsedGemini: any;
+        try {
+          parsedGemini = JSON.parse(rawContentText);
+        } catch {
+          return new Response(
+            JSON.stringify({ error: "No se pudo interpretar la respuesta de Gemini como JSON válido." }),
+            { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 7. Post-validación estricta en el servidor: comprobación código a código contra la BD
+        const codigosValidos = new Set(criteriosBd.map((c: any) => String(c.codigo).trim()));
+        const rawItems = Array.isArray(parsedGemini?.items) ? parsedGemini.items : [];
+
+        const itemsValidados = rawItems.map((it: any, idx: number) => {
+          const itemCriterios = Array.isArray(it?.criterios) ? it.criterios : [];
+          // FILTRO ESTRICTO: solo se conservan los códigos que existan exactamente en la base de datos
+          const criteriosAprobados = itemCriterios
+            .map((c: any) => String(c).trim())
+            .filter((c: string) => codigosValidos.has(c));
+
+          const itemNumero = String(idx + 1);
+          const itemTitulo = typeof it?.titulo === "string" && it.titulo.trim()
+            ? it.titulo.trim()
+            : `Apartado ${itemNumero}`;
+
+          const itemPeso = typeof it?.peso === "number" && !isNaN(it.peso) && it.peso > 0
+            ? Math.round(it.peso * 100) / 100
+            : null;
+
+          return {
+            id: crypto.randomUUID().toLowerCase(),
+            numero: itemNumero,
+            titulo: itemTitulo,
+            peso: itemPeso,
+            criterios: criteriosAprobados,
+            criteriosPendientes: criteriosAprobados.length === 0,
+            descriptores: {
+              "1": it?.descriptores?.["1"] || "Inicial / Insuficiente",
+              "2": it?.descriptores?.["2"] || "En proceso / Suficiente",
+              "3": it?.descriptores?.["3"] || "Conseguido / Notable",
+              "4": it?.descriptores?.["4"] || "Avanzado / Sobresaliente",
+            },
+          };
+        });
+
+        const tipoSugerido = ["ACTIVIDAD", "TRABAJO", "EXAMEN"].includes(parsedGemini?.tipo)
+          ? parsedGemini.tipo
+          : "ACTIVIDAD";
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            borrador: {
+              titulo: typeof parsedGemini?.titulo === "string" && parsedGemini.titulo.trim()
+                ? parsedGemini.titulo.trim()
+                : "Nueva Rúbrica",
+              tipo: tipoSugerido,
+              descripcion: typeof parsedGemini?.descripcion === "string" && parsedGemini.descripcion.trim()
+                ? parsedGemini.descripcion.trim()
+                : null,
+              items: itemsValidados,
+              totalCriteriosDisponibles: criteriosBd.length,
+            },
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       // Comprobación de si es petición para actualizar apartados de una rúbrica
       const isActualizarRubrica = body?.tipo === 'actualizar_rubrica' 
         || body?.tipo === 'rubrica'
