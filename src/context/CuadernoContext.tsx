@@ -6,7 +6,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { GrupoDocente, fetchGruposDocente, fetchCuadernoGrupo } from '../services/gruposService';
-import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica } from '../types';
+import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica, ActividadDetalle } from '../types';
 
 export type EvaluacionPeriodo = '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
 export type NavTab = 'actividades' | 'rubricas' | 'filtro' | 'resultados' | 'configuracion';
@@ -44,6 +44,7 @@ interface CuadernoContextValue {
   updateCalificaciones: (calificaciones: Calificacion[]) => void;
   updateCalificacionesApartados: (apartados: CalificacionApartado[]) => void;
   updateRubrica: (rubrica: Rubrica) => void;
+  addRubricaYActividad: (rubrica: Rubrica, actividad: ActividadDetalle) => void;
 
   // Control de cambios no guardados
   hasUnsavedChanges: boolean;
@@ -391,6 +392,37 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
+  const addRubricaYActividad = useCallback(
+    (nuevaRubrica: Rubrica, nuevaActividad: ActividadDetalle) => {
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        const rubricasPrevias = prev.rubricas || [];
+        const existsRubrica = rubricasPrevias.some((r) => r.id === nuevaRubrica.id);
+        const rubricasActualizadas = existsRubrica
+          ? rubricasPrevias.map((r) => (r.id === nuevaRubrica.id ? nuevaRubrica : r))
+          : [...rubricasPrevias, nuevaRubrica];
+
+        const actividadesPrevias = prev.actividades || [];
+        const existsActividad = actividadesPrevias.some((a) => a.id === nuevaActividad.id);
+        const actividadesActualizadas = existsActividad
+          ? actividadesPrevias.map((a) => (a.id === nuevaActividad.id ? nuevaActividad : a))
+          : [...actividadesPrevias, nuevaActividad];
+
+        return {
+          ...prev,
+          rubricas: rubricasActualizadas,
+          actividades: actividadesActualizadas,
+          estadisticas: {
+            ...prev.estadisticas,
+            totalRubricas: rubricasActualizadas.length,
+            totalActividades: actividadesActualizadas.length,
+          },
+        };
+      });
+    },
+    []
+  );
+
   const selectedGrupo = grupos.find((g) => g.id === selectedGrupoId) || null;
 
   return (
@@ -417,6 +449,7 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateCalificaciones,
         updateCalificacionesApartados,
         updateRubrica,
+        addRubricaYActividad,
 
         hasUnsavedChanges,
         setHasUnsavedChanges,
@@ -453,6 +486,7 @@ export function useCuaderno(): CuadernoContextValue {
       updateCalificaciones: () => {},
       updateCalificacionesApartados: () => {},
       updateRubrica: () => {},
+      addRubricaYActividad: () => {},
       hasUnsavedChanges: false,
       setHasUnsavedChanges: () => {},
       connectionInfo: {

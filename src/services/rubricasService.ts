@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Rubrica } from '../types';
-import { parseRubricaItems, isValidUuid, asegurarApartadosConUuid } from '../utils/rubricaUtils';
+import { Rubrica, ActividadDetalle, RubricaItem } from '../types';
+import { parseRubricaItems, isValidUuid, asegurarApartadosConUuid, generateUuid } from '../utils/rubricaUtils';
 import { getCurrentIdToken } from './authService';
 
 const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
@@ -103,5 +103,134 @@ export async function asegurarYPersistirRubricaUuids(
     ...rubricaConUuids,
     ...data.rubrica,
     items: parseRubricaItems(data.rubrica.items),
+  };
+}
+
+export interface CrearRubricaPayload {
+  grupoId: string;
+  titulo: string;
+  tipoRubrica: 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
+  evaluacionPeriodo: '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
+  descripcion?: string | null;
+  items?: Array<{
+    id?: string;
+    numero?: string;
+    titulo: string;
+    peso?: number | null;
+    criterios?: string[];
+    criterio?: string;
+    descriptores?: Record<string, string>;
+  }>;
+}
+
+export interface CrearRubricaResultado {
+  success: boolean;
+  rubrica: Rubrica;
+  actividad: ActividadDetalle;
+}
+
+/**
+ * Crea una nueva rúbrica y su actividad vinculada en Supabase a través de la
+ * Edge Function 'fernanditio-data', garantizando UUIDs v4 RFC 4122 únicos
+ * y persistidos en public.rubricas.items desde el primer guardado.
+ */
+export async function crearRubricaYActividad(
+  payload: CrearRubricaPayload
+): Promise<CrearRubricaResultado> {
+  const { grupoId, titulo, tipoRubrica, evaluacionPeriodo, descripcion, items = [] } = payload;
+
+  if (!grupoId || !grupoId.trim()) {
+    throw new Error('Identificador de grupo inválido para crear la rúbrica.');
+  }
+
+  if (!titulo || !titulo.trim()) {
+    throw new Error('El título de la rúbrica y de la actividad no puede estar vacío.');
+  }
+
+  // Asegurar que cada apartado tenga UUID v4 persistente generado antes del envío
+  const itemsConUuid = items.map((it, idx) => {
+    const cleanId = typeof it.id === 'string' && isValidUuid(it.id)
+      ? it.id.trim().toLowerCase()
+      : generateUuid().toLowerCase();
+
+    return {
+      id: cleanId,
+      numero: it.numero ? String(it.numero).trim() : String(idx + 1),
+      titulo: it.titulo && it.titulo.trim() ? it.titulo.trim() : `Apartado ${idx + 1}`,
+      peso: typeof it.peso === 'number' && !isNaN(it.peso) ? it.peso : null,
+      criterios: Array.isArray(it.criterios) ? it.criterios : (it.criterio ? [it.criterio] : []),
+      descriptores: it.descriptores && typeof it.descriptores === 'object' ? it.descriptores : {
+        "1": "Inicial / Insuficiente",
+        "2": "En proceso / Suficiente",
+        "3": "Conseguido / Notable",
+        "4": "Avanzado / Sobresaliente",
+      },
+    };
+  });
+
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión autenticada activa para crear la rúbrica en Supabase.');
+  }
+
+  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: 'crear_rubrica',
+        grupoId,
+        titulo: titulo.trim(),
+        tipoRubrica,
+        evaluacionPeriodo,
+        descripcion: descripcion?.trim() || null,
+        items: itemsConUuid,
+      }),
+    });
+  } catch (err: any) {
+    throw new Error(`Error de red al conectar con el servidor: ${err?.message || 'Fallo de conexión'}`);
+  }
+
+  if (!response.ok) {
+    let detalleError = `HTTP ${response.status}: ${response.statusText}`;
+    try {
+      const errorJson = await response.json();
+      if (errorJson?.error) {
+        detalleError = errorJson.error;
+      }
+    } catch {
+      // Ignorar fallo de parseo JSON
+    }
+    throw new Error(`El servidor rechazó la creación de la rúbrica (${detalleError}).`);
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch (err: any) {
+    throw new Error('Respuesta malformada del servidor al crear la rúbrica.');
+  }
+
+  if (!data?.success || !data?.rubrica || !data?.actividad) {
+    throw new Error(data?.error || 'Supabase no confirmó la persistencia de la nueva rúbrica y su actividad vinculada.');
+  }
+
+  const rubricaRetornada: Rubrica = {
+    ...data.rubrica,
+    items: parseRubricaItems(data.rubrica.items),
+  };
+
+  const actividadRetornada: ActividadDetalle = data.actividad;
+
+  return {
+    success: true,
+    rubrica: rubricaRetornada,
+    actividad: actividadRetornada,
   };
 }

@@ -218,6 +218,151 @@ serve(async (req: Request) => {
         );
       }
 
+      // Comprobación de si es petición para crear una nueva rúbrica y su actividad vinculada
+      const isCrearRubrica = body?.tipo === 'crear_rubrica';
+      if (isCrearRubrica) {
+        // 1. Verificación de propiedad del grupo
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 2. Validación de título
+        const rawTitulo = typeof body?.titulo === 'string' ? body.titulo.trim() : '';
+        if (!rawTitulo || rawTitulo.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El título de la rúbrica es obligatorio (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 3. Validación y normalización de tipo ('ACTIVIDAD' | 'TRABAJO' | 'EXAMEN')
+        const validTipos = ['ACTIVIDAD', 'TRABAJO', 'EXAMEN'];
+        const inputTipo = typeof body?.tipoRubrica === 'string' 
+          ? body.tipoRubrica.trim().toUpperCase() 
+          : (typeof body?.rubricaTipo === 'string' ? body.rubricaTipo.trim().toUpperCase() : 'ACTIVIDAD');
+        const tipoFinal = validTipos.includes(inputTipo) ? inputTipo : 'ACTIVIDAD';
+
+        // 4. Validación de período de evaluación
+        const validPeriodos = ['1.º Ev', '2.º Ev', '3.º Ev', 'Global'];
+        const inputPeriodo = typeof body?.evaluacionPeriodo === 'string' ? body.evaluacionPeriodo.trim() : '1.º Ev';
+        const periodoFinal = validPeriodos.includes(inputPeriodo) ? inputPeriodo : '1.º Ev';
+
+        // 5. Descripción opcional
+        const descripcionFinal = typeof body?.descripcion === 'string' && body.descripcion.trim()
+          ? body.descripcion.trim()
+          : null;
+
+        // 6. Preparación y validación de apartados garantizando UUIDs válidos (RFC 4122)
+        const rawItems = Array.isArray(body?.items) ? body.items : [];
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const itemsFinales = rawItems.map((it: any, idx: number) => {
+          const itemId = typeof it?.id === 'string' && uuidRegex.test(it.id.trim())
+            ? it.id.trim().toLowerCase()
+            : crypto.randomUUID().toLowerCase();
+          const itemNumero = it?.numero ? String(it.numero).trim() : String(idx + 1);
+          const itemTitulo = typeof it?.titulo === 'string' && it.titulo.trim()
+            ? it.titulo.trim()
+            : `Apartado ${itemNumero}`;
+          const itemPeso = typeof it?.peso === 'number' && !isNaN(it.peso)
+            ? it.peso
+            : (it?.peso !== null && it?.peso !== undefined && !isNaN(Number(it.peso)) ? Number(it.peso) : null);
+
+          let itemCriterios: string[] = [];
+          if (Array.isArray(it?.criterios)) {
+            itemCriterios = it.criterios
+              .filter((c: any) => typeof c === 'string' && c.trim())
+              .map((c: string) => c.trim());
+          } else if (typeof it?.criterio === 'string' && it.criterio.trim()) {
+            itemCriterios = [it.criterio.trim()];
+          }
+
+          const itemDescriptores = it?.descriptores && typeof it.descriptores === 'object' && !Array.isArray(it.descriptores)
+            ? it.descriptores
+            : {
+                "1": "Inicial / Insuficiente",
+                "2": "En proceso / Suficiente",
+                "3": "Conseguido / Notable",
+                "4": "Avanzado / Sobresaliente",
+              };
+
+          return {
+            id: itemId,
+            numero: itemNumero,
+            titulo: itemTitulo,
+            peso: itemPeso,
+            criterios: itemCriterios,
+            descriptores: itemDescriptores,
+          };
+        });
+
+        // 7. Generación de identificadores únicos para la rúbrica y la actividad
+        const rubricaId = crypto.randomUUID().toLowerCase();
+        const actividadId = crypto.randomUUID().toLowerCase();
+
+        // 8. Inserción atómica transaccional de la rúbrica y la actividad asociada mediante RPC
+        const { data: rpcData, error: rpcError } = await supabase.rpc(
+          "crear_rubrica_con_actividad",
+          {
+            p_grupo_id: grupo.id,
+            p_rubrica_id: rubricaId,
+            p_titulo: rawTitulo,
+            p_tipo: tipoFinal,
+            p_descripcion: descripcionFinal,
+            p_items: itemsFinales,
+            p_actividad_id: actividadId,
+            p_evaluacion_periodo: periodoFinal,
+          }
+        );
+
+        if (rpcError || !rpcData || !rpcData.success) {
+          console.error("[fernanditio-data] Error en RPC crear_rubrica_con_actividad:", rpcError);
+          return new Response(
+            JSON.stringify({
+              error: `Error al persistir atómicamente la rúbrica y su actividad en Supabase: ${rpcError?.message || "Fallo en transacción RPC"}`,
+              code: rpcError?.code,
+            }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const nuevaRubrica = rpcData.rubrica;
+        const nuevaActividad = rpcData.actividad;
+
+        // 10. Construcción de actividadDetalle congruente con el contrato de la aplicación
+        const codigosSet = new Set<string>();
+        for (const it of itemsFinales) {
+          for (const c of it.criterios) {
+            codigosSet.add(c);
+          }
+        }
+
+        const actividadDetalle = {
+          ...nuevaActividad,
+          criteriosCodigos: Array.from(codigosSet),
+          estadoVinculacion: "rubrica_confirmada",
+          advertenciaRubrica: null,
+        };
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            rubrica: nuevaRubrica,
+            actividad: actividadDetalle,
+          }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       // Comprobación de si es petición para actualizar apartados de una rúbrica
       const isActualizarRubrica = body?.tipo === 'actualizar_rubrica' 
         || body?.tipo === 'rubrica'
