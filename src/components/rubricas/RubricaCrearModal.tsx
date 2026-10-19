@@ -88,16 +88,35 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [analisisSuccessMessage, setAnalisisSuccessMessage] = useState<string | null>(null);
   const [analisisError, setAnalisisError] = useState<string | null>(null);
 
-  // Referencias a inputs ocultos de archivos
+  // Referencias a inputs ocultos de archivos (montados fuera del formulario)
   const fileInputFotoRef = useRef<HTMLInputElement>(null);
+  const fileInputCamaraRef = useRef<HTMLInputElement>(null);
   const fileInputWordRef = useRef<HTMLInputElement>(null);
+  const autoTriggeredRef = useRef(false);
 
-  // Disparo automático si se solicitó origen asistido al abrir
+  // Disparo automático seguro si se solicitó origen asistido al abrir (una sola vez)
   useEffect(() => {
+    if (autoTriggeredRef.current) return;
     if (origenInicial === 'foto') {
-      setTimeout(() => fileInputFotoRef.current?.click(), 100);
+      autoTriggeredRef.current = true;
+      const timer = setTimeout(() => {
+        try {
+          fileInputFotoRef.current?.click();
+        } catch (e) {
+          console.warn('[RubricaCrearModal] No se pudo invocar automáticamente el selector de imagen:', e);
+        }
+      }, 150);
+      return () => clearTimeout(timer);
     } else if (origenInicial === 'word') {
-      setTimeout(() => fileInputWordRef.current?.click(), 100);
+      autoTriggeredRef.current = true;
+      const timer = setTimeout(() => {
+        try {
+          fileInputWordRef.current?.click();
+        } catch (e) {
+          console.warn('[RubricaCrearModal] No se pudo invocar automáticamente el selector de Word:', e);
+        }
+      }, 150);
+      return () => clearTimeout(timer);
     }
   }, [origenInicial]);
 
@@ -166,22 +185,48 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
   // Aplicar borrador recibido de Gemini a los estados del formulario para revisión humana
   const aplicarBorradorGemini = (borrador: BorradorRubricaGemini, nombreOrigen: string) => {
-    if (borrador.titulo) setTitulo(borrador.titulo);
-    if (borrador.tipo) setTipo(borrador.tipo);
-    if (borrador.descripcion) setDescripcion(borrador.descripcion);
+    if (!borrador) {
+      throw new Error('La respuesta de Gemini no contiene un borrador válido.');
+    }
+
+    if (borrador.titulo && typeof borrador.titulo === 'string') {
+      setTitulo(borrador.titulo.trim());
+    }
+
+    // Normalizar de forma estricta el tipo de rúbrica a ACTIVIDAD, TRABAJO o EXAMEN
+    if (borrador.tipo) {
+      const tipoStr = String(borrador.tipo).toUpperCase().trim();
+      if (tipoStr.includes('TRABAJO') || tipoStr.includes('PROYECTO')) {
+        setTipo('TRABAJO');
+      } else if (tipoStr.includes('EXAMEN') || tipoStr.includes('PRUEBA')) {
+        setTipo('EXAMEN');
+      } else {
+        setTipo('ACTIVIDAD');
+      }
+    }
+
+    if (borrador.descripcion && typeof borrador.descripcion === 'string') {
+      setDescripcion(borrador.descripcion.trim());
+    }
 
     const codigosAsociados = new Set<string>();
-    const apartadosFormateados: ApartadoFormState[] = (borrador.items || []).map((it, idx) => {
-      (it.criterios || []).forEach((c) => codigosAsociados.add(c));
-      return {
-        id: it.id || generateUuid().toLowerCase(),
-        numero: it.numero || String(idx + 1),
-        titulo: it.titulo,
-        peso: it.peso,
-        criterios: it.criterios || [],
-        descriptores: it.descriptores,
-      };
-    });
+    const apartadosFormateados: ApartadoFormState[] = Array.isArray(borrador.items)
+      ? borrador.items.map((it, idx) => {
+          const itemCriterios = Array.isArray(it?.criterios)
+            ? it.criterios.filter((c: any) => typeof c === 'string' && c.trim())
+            : [];
+          itemCriterios.forEach((c) => codigosAsociados.add(c));
+
+          return {
+            id: it?.id && typeof it.id === 'string' && it.id.trim() ? it.id : generateUuid().toLowerCase(),
+            numero: it?.numero && typeof it.numero === 'string' ? it.numero : String(idx + 1),
+            titulo: it?.titulo && typeof it.titulo === 'string' && it.titulo.trim() ? it.titulo.trim() : `Apartado ${idx + 1}`,
+            peso: typeof it?.peso === 'number' && !isNaN(it.peso) ? it.peso : null,
+            criterios: itemCriterios,
+            descriptores: it?.descriptores && typeof it.descriptores === 'object' ? it.descriptores : undefined,
+          };
+        })
+      : [];
 
     setApartados(apartadosFormateados);
     setCriteriosSeleccionados(Array.from(codigosAsociados));
@@ -200,9 +245,11 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
   // Manejador para fotografía (cámara o selección de archivo)
   const handleFotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
     const file = e.target.files?.[0];
-    if (!file) return;
+    // Limpiar siempre el valor para permitir volver a seleccionar el mismo archivo
     e.target.value = '';
+    if (!file) return;
 
     setIsAnalyzingWithGemini(true);
     setAnalisisError(null);
@@ -230,9 +277,11 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
   // Manejador para documento Word (.docx)
   const handleWordSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
     const file = e.target.files?.[0];
-    if (!file) return;
+    // Limpiar siempre el valor para permitir volver a seleccionar el mismo archivo
     e.target.value = '';
+    if (!file) return;
 
     setIsAnalyzingWithGemini(true);
     setAnalisisError(null);
@@ -319,8 +368,14 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     return c.codigo.toLowerCase().includes(q) || c.descripcion.toLowerCase().includes(q);
   });
 
-  // Configuración visual según tipo
-  const tipoConfig = {
+  // Configuración visual según tipo con fallback seguro garantizado
+  const tipoConfigs: Record<TipoRubricaCrear, {
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    color: string;
+    badgeColor: string;
+    headerBg: string;
+  }> = {
     ACTIVIDAD: {
       label: 'Actividad',
       icon: FileCheck,
@@ -342,8 +397,9 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       badgeColor: 'bg-purple-100 text-purple-800 border-purple-300',
       headerBg: 'bg-[#6d28d9]',
     },
-  }[tipo];
+  };
 
+  const tipoConfig = tipoConfigs[tipo] || tipoConfigs.ACTIVIDAD;
   const IconoTipo = tipoConfig.icon;
 
   return (
@@ -353,6 +409,30 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto"
     >
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-2xl overflow-hidden flex flex-col max-h-[94vh] animate-in fade-in zoom-in-95 duration-150">
+        {/* Inputs ocultos de archivo para fotografía, cámara y documento Word (FUERA del form para evitar submits o recargas accidentales) */}
+        <input
+          ref={fileInputFotoRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleFotoSelect}
+        />
+        <input
+          ref={fileInputCamaraRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={handleFotoSelect}
+        />
+        <input
+          ref={fileInputWordRef}
+          type="file"
+          accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          className="hidden"
+          onChange={handleWordSelect}
+        />
+
         {/* Cabecera del Modal */}
         <div className={`${tipoConfig.headerBg} text-white px-5 py-4 flex items-center justify-between gap-3 shadow-sm select-none`}>
           <div className="flex items-center gap-2.5">
@@ -382,23 +462,6 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
         {/* Contenido con Scroll */}
         <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-5 text-slate-800 text-xs">
-          {/* Inputs ocultos de archivo para fotografía y documento Word */}
-          <input
-            ref={fileInputFotoRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={handleFotoSelect}
-          />
-          <input
-            ref={fileInputWordRef}
-            type="file"
-            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            className="hidden"
-            onChange={handleWordSelect}
-          />
-
           {/* ========================================================
               0. ASISTENTE INTELIGENTE CON GEMINI (FOTO Y WORD)
               ======================================================== */}
@@ -428,18 +491,41 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
             <div className="flex flex-wrap items-center gap-2 pt-0.5">
               <button
                 type="button"
-                onClick={() => fileInputFotoRef.current?.click()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  fileInputFotoRef.current?.click();
+                }}
                 disabled={isAnalyzingWithGemini || isSubmitting}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-                title="Tomar foto con la cámara del dispositivo o subir imagen"
+                title="Seleccionar foto o imagen desde el dispositivo o galería"
               >
                 <Camera className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Fotografía / Cámara</span>
+                <span>Foto / Galería</span>
               </button>
 
               <button
                 type="button"
-                onClick={() => fileInputWordRef.current?.click()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  fileInputCamaraRef.current?.click();
+                }}
+                disabled={isAnalyzingWithGemini || isSubmitting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                title="Tomar foto directamente con la cámara del dispositivo"
+              >
+                <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Cámara directa</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  fileInputWordRef.current?.click();
+                }}
                 disabled={isAnalyzingWithGemini || isSubmitting}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                 title="Importar archivo Word (.docx) con matriz o tabla de rúbrica"

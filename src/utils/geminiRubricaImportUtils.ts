@@ -6,32 +6,66 @@
 import mammoth from 'mammoth';
 
 /**
- * Procesa y optimiza una fotografía (desde cámara o archivo) reduciendo su resolución
+ * Procesa y optimiza una fotografía reduciendo su resolución
  * al límite óptimo de legibilidad para Gemini (máx. 1600px) y comprimiendo a JPEG.
- * Evita desbordamiento de red y respeta la nitidez del texto.
+ * Utiliza URL.createObjectURL() para evitar crear cadenas Base64 gigantes en memoria
+ * y libera siempre los recursos temporales mediante URL.revokeObjectURL().
  */
 export async function optimizeImageForGemini(
   file: File,
   maxDimension = 1600,
   quality = 0.82
 ): Promise<{ base64: string; mimeType: string }> {
+  if (!file) {
+    throw new Error('No se ha proporcionado ningún archivo para procesar.');
+  }
+
+  const isImageMime = file.type ? file.type.startsWith('image/') : false;
+  const isImageExt = /\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name || '');
+
+  if (!isImageMime && !isImageExt) {
+    throw new Error(`El archivo seleccionado (${file.name || 'desconocido'}) no es una imagen compatible (JPEG, PNG, WebP o HEIC).`);
+  }
+
   return new Promise((resolve, reject) => {
-    // Si no es imagen, rechazar inmediatamente
-    if (!file.type.startsWith('image/')) {
-      reject(new Error(`El archivo seleccionado (${file.name}) no es una imagen válida.`));
+    let objectUrl = '';
+    try {
+      objectUrl = URL.createObjectURL(file);
+    } catch (urlErr: any) {
+      reject(new Error(`No se pudo generar la URL de objeto para la imagen: ${urlErr?.message || urlErr}`));
       return;
     }
 
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Error al leer el archivo de imagen.'));
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('No se pudo decodificar la imagen seleccionada.'));
-      img.onload = () => {
-        let width = img.width;
-        let height = img.height;
+    const cleanup = () => {
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          // Ignorar
+        }
+        objectUrl = '';
+      }
+    };
 
-        // Escalar si supera la dimensión máxima
+    const img = new Image();
+
+    img.onerror = () => {
+      cleanup();
+      reject(new Error(`No se pudo decodificar la imagen (${file.name}). Asegúrate de que el formato sea JPEG, PNG o WebP válido.`));
+    };
+
+    img.onload = () => {
+      try {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+
+        if (!width || !height) {
+          cleanup();
+          reject(new Error('La imagen no contiene dimensiones válidas para el análisis.'));
+          return;
+        }
+
+        // Escalar si supera la dimensión máxima manteniendo la relación de aspecto
         if (width > maxDimension || height > maxDimension) {
           if (width > height) {
             height = Math.round((height * maxDimension) / width);
@@ -48,7 +82,8 @@ export async function optimizeImageForGemini(
 
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          reject(new Error('No se pudo inicializar el contexto gráfico para procesar la imagen.'));
+          cleanup();
+          reject(new Error('No se pudo inicializar el contexto gráfico Canvas del navegador.'));
           return;
         }
 
@@ -60,16 +95,24 @@ export async function optimizeImageForGemini(
         const dataUrl = canvas.toDataURL('image/jpeg', quality);
         const rawBase64 = dataUrl.split(',')[1] || '';
 
+        cleanup();
+
+        if (!rawBase64) {
+          reject(new Error('La compresión gráfica de la imagen no generó datos válidos.'));
+          return;
+        }
+
         resolve({
           base64: rawBase64,
           mimeType: 'image/jpeg',
         });
-      };
-
-      img.src = e.target?.result as string;
+      } catch (err: any) {
+        cleanup();
+        reject(new Error(`Fallo durante el procesamiento gráfico de la imagen: ${err?.message || err}`));
+      }
     };
 
-    reader.readAsDataURL(file);
+    img.src = objectUrl;
   });
 }
 

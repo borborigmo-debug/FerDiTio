@@ -531,7 +531,7 @@ REGLAS OBLIGATORIAS:
         };
 
         // 6. Invocación a Gemini REST API
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
 
         let geminiRes: Response;
         try {

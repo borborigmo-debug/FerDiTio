@@ -183,7 +183,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             {/* Accesos directos a Gemini (Foto y Word) */}
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD', 'foto')}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleOpenCrear('ACTIVIDAD', 'foto');
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
               title="Fotografiar o subir imagen de la rúbrica para estructurarla con Gemini"
             >
@@ -193,7 +197,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
 
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD', 'word')}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleOpenCrear('ACTIVIDAD', 'word');
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-sky-50 hover:from-indigo-100 hover:to-sky-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
               title="Importar documento Word (.docx) para estructurarlo con Gemini"
             >
@@ -249,7 +257,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             <div className="h-5 w-[1px] bg-slate-300 hidden sm:block mx-1" />
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD', 'foto')}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleOpenCrear('ACTIVIDAD', 'foto');
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
             >
               <Camera className="w-3.5 h-3.5 text-indigo-600" />
@@ -257,7 +269,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD', 'word')}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleOpenCrear('ACTIVIDAD', 'word');
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5 text-indigo-600" />
