@@ -12,10 +12,11 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import * as jose from "https://esm.sh/jose@4.14.4";
 
-// 1. Orígenes autorizados confirmados para esta aplicación
+ // 1. Orígenes autorizados confirmados para esta aplicación
 const ALLOWED_ORIGINS = [
   "https://ais-dev-xvmxpcqhfojwyhwcx3ymoc-404672769980.europe-west1.run.app",
   "https://ais-pre-xvmxpcqhfojwyhwcx3ymoc-404672769980.europe-west1.run.app",
+  "https://ferditio.ai.studio",
   "http://localhost:3000",
 ];
 
@@ -708,6 +709,186 @@ REGLAS OBLIGATORIAS:
           JSON.stringify({
             success: true,
             rubrica: rubricaActualizada,
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // ELIMINACIÓN DE ACTIVIDADES EN LOTE
+      // =========================================================================
+      const isEliminarActividades = body?.tipo === 'eliminar_actividades';
+      if (isEliminarActividades) {
+        const actividadIds = Array.isArray(body?.actividadIds) 
+          ? body.actividadIds.map((id: any) => String(id).trim()).filter(Boolean)
+          : [];
+
+        if (actividadIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe proporcionar al menos un ID de actividad a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 1. Verificación de propiedad del grupo
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 2. Filtrar solo actividades que efectivamente pertenezcan al grupo
+        const { data: actsValidas, error: actsError } = await supabase
+          .from("actividades")
+          .select("id")
+          .eq("grupo_id", grupo.id)
+          .in("id", actividadIds);
+
+        if (actsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al comprobar actividades del grupo: ${actsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const idsABorrar = (actsValidas || []).map((a: any) => a.id);
+        if (idsABorrar.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguna de las actividades indicadas pertenece a este grupo." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 3. Eliminar calificaciones por apartado asociadas
+        await supabase
+          .from("calificaciones_apartados")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("actividad_id", idsABorrar);
+
+        // 4. Eliminar calificaciones estándar asociadas
+        await supabase
+          .from("calificaciones")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("actividad_id", idsABorrar);
+
+        // 5. Eliminar las actividades
+        const { error: delActError } = await supabase
+          .from("actividades")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("id", idsABorrar);
+
+        if (delActError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar actividades en Supabase: ${delActError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            eliminadas: idsABorrar,
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // ELIMINACIÓN DE RÚBRICAS EN LOTE
+      // =========================================================================
+      const isEliminarRubricas = body?.tipo === 'eliminar_rubricas';
+      if (isEliminarRubricas) {
+        const rubricaIds = Array.isArray(body?.rubricaIds)
+          ? body.rubricaIds.map((id: any) => String(id).trim()).filter(Boolean)
+          : [];
+
+        if (rubricaIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe proporcionar al menos un ID de rúbrica a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 1. Verificación de propiedad del grupo
+        const { data: grupo, error: grupoError } = await supabase
+          .from("grupos")
+          .select("id, profesor_id")
+          .eq("id", targetGrupoId)
+          .eq("profesor_id", profesor.id)
+          .maybeSingle();
+
+        if (grupoError || !grupo) {
+          return new Response(
+            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 2. Filtrar rúbricas que pertenecen al grupo
+        const { data: rubsValidas, error: rubsError } = await supabase
+          .from("rubricas")
+          .select("id")
+          .eq("grupo_id", grupo.id)
+          .in("id", rubricaIds);
+
+        if (rubsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al comprobar rúbricas del grupo: ${rubsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const idsABorrar = (rubsValidas || []).map((r: any) => r.id);
+        if (idsABorrar.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguna de las rúbricas indicadas pertenece a este grupo." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 3. Desvincular rubrica_id en actividades asociadas (para no romper las actividades)
+        await supabase
+          .from("actividades")
+          .update({ rubrica_id: null })
+          .eq("grupo_id", grupo.id)
+          .in("rubrica_id", idsABorrar);
+
+        // 4. Eliminar calificaciones por apartado asociadas
+        await supabase
+          .from("calificaciones_apartados")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("rubrica_id", idsABorrar);
+
+        // 5. Eliminar las rúbricas
+        const { error: delRubError } = await supabase
+          .from("rubricas")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("id", idsABorrar);
+
+        if (delRubError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar rúbricas en Supabase: ${delRubError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            eliminadas: idsABorrar,
           }),
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

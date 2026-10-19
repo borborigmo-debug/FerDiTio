@@ -5,7 +5,8 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { GrupoDocente, fetchGruposDocente, fetchCuadernoGrupo } from '../services/gruposService';
+import { GrupoDocente, fetchGruposDocente, fetchCuadernoGrupo, eliminarActividadesLote } from '../services/gruposService';
+import { eliminarRubricasLote } from '../services/rubricasService';
 import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica, ActividadDetalle } from '../types';
 
 export type EvaluacionPeriodo = '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
@@ -45,6 +46,8 @@ interface CuadernoContextValue {
   updateCalificacionesApartados: (apartados: CalificacionApartado[]) => void;
   updateRubrica: (rubrica: Rubrica) => void;
   addRubricaYActividad: (rubrica: Rubrica, actividad: ActividadDetalle) => void;
+  eliminarActividades: (actividadIds: string[]) => Promise<{ success: boolean; eliminadas: string[] }>;
+  eliminarRubricas: (rubricaIds: string[]) => Promise<{ success: boolean; eliminadas: string[] }>;
 
   // Control de cambios no guardados
   hasUnsavedChanges: boolean;
@@ -423,6 +426,82 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
+  const eliminarActividades = useCallback(
+    async (actividadIds: string[]) => {
+      if (!selectedGrupoId) {
+        throw new Error('No hay ningún grupo seleccionado.');
+      }
+      const res = await eliminarActividadesLote(selectedGrupoId, actividadIds);
+      const eliminadasSet = new Set(res.eliminadas);
+
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        const actsRestantes = (prev.actividades || []).filter((a) => !eliminadasSet.has(a.id));
+        const califsRestantes = (prev.calificaciones || []).filter((c) => !eliminadasSet.has(c.actividad_id));
+        const apartadosRestantes = (prev.calificacionesApartados || []).filter(
+          (ca) => !ca.actividad_id || !eliminadasSet.has(ca.actividad_id)
+        );
+
+        return {
+          ...prev,
+          actividades: actsRestantes,
+          calificaciones: califsRestantes,
+          calificacionesApartados: apartadosRestantes,
+          estadisticas: {
+            ...prev.estadisticas,
+            totalActividades: actsRestantes.length,
+          },
+        };
+      });
+
+      return res;
+    },
+    [selectedGrupoId]
+  );
+
+  const eliminarRubricas = useCallback(
+    async (rubricaIds: string[]) => {
+      if (!selectedGrupoId) {
+        throw new Error('No hay ningún grupo seleccionado.');
+      }
+      const res = await eliminarRubricasLote(selectedGrupoId, rubricaIds);
+      const eliminadasSet = new Set(res.eliminadas);
+
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        const rubsRestantes = (prev.rubricas || []).filter((r) => !eliminadasSet.has(r.id));
+        const actsActualizadas = (prev.actividades || []).map((a) => {
+          if (a.rubrica_id && eliminadasSet.has(a.rubrica_id)) {
+            return {
+              ...a,
+              rubrica_id: null,
+              estadoVinculacion: 'sin_rubrica' as const,
+              advertenciaRubrica: 'Rúbrica eliminada previamente',
+            };
+          }
+          return a;
+        });
+        const apartadosRestantes = (prev.calificacionesApartados || []).filter(
+          (ca) => !eliminadasSet.has(ca.rubrica_id)
+        );
+
+        return {
+          ...prev,
+          rubricas: rubsRestantes,
+          actividades: actsActualizadas,
+          calificacionesApartados: apartadosRestantes,
+          estadisticas: {
+            ...prev.estadisticas,
+            totalRubricas: rubsRestantes.length,
+          },
+        };
+      });
+
+      return res;
+    },
+    [selectedGrupoId]
+  );
+
   const selectedGrupo = grupos.find((g) => g.id === selectedGrupoId) || null;
 
   return (
@@ -450,6 +529,8 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateCalificacionesApartados,
         updateRubrica,
         addRubricaYActividad,
+        eliminarActividades,
+        eliminarRubricas,
 
         hasUnsavedChanges,
         setHasUnsavedChanges,
@@ -487,6 +568,8 @@ export function useCuaderno(): CuadernoContextValue {
       updateCalificacionesApartados: () => {},
       updateRubrica: () => {},
       addRubricaYActividad: () => {},
+      eliminarActividades: async () => ({ success: false, eliminadas: [] }),
+      eliminarRubricas: async () => ({ success: false, eliminadas: [] }),
       hasUnsavedChanges: false,
       setHasUnsavedChanges: () => {},
       connectionInfo: {

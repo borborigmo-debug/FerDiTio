@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   X,
   Info,
+  Trash2,
 } from 'lucide-react';
 
 interface RubricaDetalleProps {
@@ -34,6 +35,7 @@ interface RubricaDetalleProps {
   actividades: ActividadDetalle[];
   onBackToList?: () => void;
   onIniciarEvaluacion?: () => void;
+  onEliminarRubrica?: () => void;
 }
 
 export const RubricaDetalle: React.FC<RubricaDetalleProps> = ({
@@ -42,6 +44,7 @@ export const RubricaDetalle: React.FC<RubricaDetalleProps> = ({
   actividades,
   onBackToList,
   onIniciarEvaluacion,
+  onEliminarRubrica,
 }) => {
   // Normalización segura y no destructiva de la rúbrica
   const rubrica = useMemo(() => normalizeRubrica(rubricaRaw), [rubricaRaw]);
@@ -158,20 +161,32 @@ export const RubricaDetalle: React.FC<RubricaDetalleProps> = ({
             <button
               type="button"
               onClick={handlePrint}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors cursor-pointer"
               title="Imprimir o exportar matriz de rúbrica a PDF"
             >
               <Printer className="w-3.5 h-3.5" aria-hidden="true" />
               <span className="hidden sm:inline">Imprimir</span>
             </button>
 
+            {onEliminarRubrica && (
+              <button
+                type="button"
+                onClick={onEliminarRubrica}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+                title="Eliminar esta rúbrica"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-600" aria-hidden="true" />
+                <span className="hidden sm:inline">Eliminar</span>
+              </button>
+            )}
+
             {onBackToList && (
               <button
                 type="button"
                 onClick={onBackToList}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-indigo-700 bg-slate-50 hover:bg-indigo-50 border border-slate-200 rounded-lg transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-indigo-700 bg-slate-50 hover:bg-indigo-50 border border-slate-200 rounded-lg transition-colors cursor-pointer"
               >
-                Volver a la lista
+                Volver al catálogo
               </button>
             )}
           </div>

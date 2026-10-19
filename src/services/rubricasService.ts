@@ -329,3 +329,52 @@ export async function analizarRubricaConGemini(
   return data.borrador;
 }
 
+/**
+ * Elimina en lote rúbricas de un grupo autorizado en Supabase,
+ * desvinculando automáticamente las actividades asociadas.
+ */
+export async function eliminarRubricasLote(
+  grupoId: string,
+  rubricaIds: string[]
+): Promise<{ success: boolean; eliminadas: string[] }> {
+  if (!grupoId || !Array.isArray(rubricaIds) || rubricaIds.length === 0) {
+    throw new Error('Parámetros inválidos para eliminar rúbricas.');
+  }
+
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión autenticada activa para eliminar rúbricas.');
+  }
+
+  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: 'eliminar_rubricas',
+        grupoId,
+        rubricaIds,
+      }),
+    });
+  } catch (err: any) {
+    throw new Error(`Error de red al conectar con el servidor: ${err?.message || err}`);
+  }
+
+  if (!response.ok) {
+    let detalle = `HTTP ${response.status}: ${response.statusText}`;
+    try {
+      const errJson = await response.json();
+      if (errJson?.error) detalle = errJson.error;
+    } catch {}
+    throw new Error(detalle);
+  }
+
+  return await response.json();
+}
+

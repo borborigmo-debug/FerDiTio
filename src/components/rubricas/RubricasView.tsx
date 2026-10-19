@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Info,
   CheckCircle2,
+  AlertTriangle,
   Pencil,
   Trash2,
   Play,
@@ -55,11 +56,11 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
   onUpdateCalificaciones,
   onUpdateCalificacionesApartados,
 }) => {
-  const { updateRubrica, addRubricaYActividad, selectedEvaluacion } = useCuaderno();
+  const { updateRubrica, addRubricaYActividad, selectedEvaluacion, eliminarRubricas } = useCuaderno();
 
   // Rúbrica seleccionada actualmente para visualización detallada de la matriz
   const [selectedRubricaId, setSelectedRubricaId] = useState<string | null>(
-    initialRubricaId || (rubricas.length === 1 ? rubricas[0].id : null)
+    initialRubricaId || null
   );
 
   // Rúbrica abierta actualmente en modo de evaluación consecutiva de alumnos (modal)
@@ -76,6 +77,60 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
 
   // Filtro de búsqueda entre las rúbricas del grupo
   const [searchRubricaQuery, setSearchRubricaQuery] = useState('');
+
+  // Selección múltiple para eliminar rúbricas del catálogo
+  const [rubricasSeleccionadas, setRubricasSeleccionadas] = useState<Set<string>>(new Set());
+  const [confirmandoEliminarRubs, setConfirmandoEliminarRubs] = useState(false);
+  const [isDeletingRubs, setIsDeletingRubs] = useState(false);
+  const [deleteRubsFeedback, setDeleteRubsFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
+
+  const handleToggleRubrica = (rubId: string) => {
+    setRubricasSeleccionadas((prev) => {
+      const next = new Set(prev);
+      if (next.has(rubId)) {
+        next.delete(rubId);
+      } else {
+        next.add(rubId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSeleccionarTodasRubs = () => {
+    if (rubricasSeleccionadas.size === rubricasFiltradas.length && rubricasFiltradas.length > 0) {
+      setRubricasSeleccionadas(new Set());
+    } else {
+      setRubricasSeleccionadas(new Set(rubricasFiltradas.map((r) => r.id)));
+    }
+  };
+
+  const handleEjecutarEliminarRubs = async () => {
+    if (rubricasSeleccionadas.size === 0) return;
+    setIsDeletingRubs(true);
+    setDeleteRubsFeedback(null);
+    try {
+      const ids = Array.from(rubricasSeleccionadas);
+      const res = await eliminarRubricas(ids);
+      setRubricasSeleccionadas(new Set());
+      setConfirmandoEliminarRubs(false);
+      if (selectedRubricaId && res.eliminadas.includes(selectedRubricaId)) {
+        setSelectedRubricaId(null);
+      }
+      setDeleteRubsFeedback({
+        type: 'success',
+        message: `Se han eliminado correctamente ${res.eliminadas.length} rúbrica(s) y se han desvinculado de las actividades del cuaderno.`,
+      });
+      setTimeout(() => setDeleteRubsFeedback(null), 5000);
+    } catch (err: any) {
+      console.error('[RubricasView] Error al eliminar rúbricas:', err);
+      setDeleteRubsFeedback({
+        type: 'error',
+        message: err?.message || 'Error al eliminar rúbricas en el servidor.',
+      });
+    } finally {
+      setIsDeletingRubs(false);
+    }
+  };
 
   // Actualizar si cambia initialRubricaId desde props externas
   useEffect(() => {
@@ -355,90 +410,235 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
               actividades={actividades}
               onBackToList={rubricas.length > 1 ? () => setSelectedRubricaId(null) : undefined}
               onIniciarEvaluacion={() => setRubricaEvaluando(rubricaSeleccionada)}
+              onEliminarRubrica={() => {
+                setRubricasSeleccionadas(new Set([rubricaSeleccionada.id]));
+                setConfirmandoEliminarRubs(true);
+              }}
             />
           ) : (
             /* Catálogo general de rúbricas del grupo */
-            <div className="space-y-3">
-              {rubricasFiltradas.map((rub) => {
-                const acts = actividadesPorRubrica.get(rub.id) || [];
-
-                return (
-                  <div
-                    key={rub.id}
-                    className="p-4 sm:p-5 rounded-xl border border-slate-200 bg-white hover:border-slate-300 shadow-2xs transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
+            <div className="space-y-4">
+              {/* Mensaje de feedback si hubo eliminación */}
+              {deleteRubsFeedback && (
+                <div
+                  className={`p-3 rounded-xl border flex items-center justify-between gap-2 text-xs animate-in fade-in ${
+                    deleteRubsFeedback.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-rose-50 border-rose-200 text-rose-800'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {deleteRubsFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    )}
+                    <span className="font-medium">{deleteRubsFeedback.message}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteRubsFeedback(null)}
+                    className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
                   >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Barra de utilidades y selección múltiple del catálogo de rúbricas */}
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="font-semibold text-slate-800">
+                    Catálogo: Mostrando {rubricasFiltradas.length} de {rubricas.length} rúbricas
+                  </span>
+
+                  {/* Casilla de selección general: Seleccionar todas */}
+                  {rubricasFiltradas.length > 0 && (
+                    <label className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 cursor-pointer select-none text-[11px] font-semibold text-slate-700 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={
+                          rubricasFiltradas.length > 0 &&
+                          rubricasSeleccionadas.size === rubricasFiltradas.length
+                        }
+                        onChange={handleToggleSeleccionarTodasRubs}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <span>
+                        {rubricasSeleccionadas.size === rubricasFiltradas.length
+                          ? 'Deseleccionar todas'
+                          : `Seleccionar todas (${rubricasFiltradas.length})`}
+                      </span>
+                    </label>
+                  )}
+
+                  {/* Botón de acción para eliminar seleccionadas */}
+                  {rubricasSeleccionadas.size > 0 && (
+                    <div className="flex items-center gap-2 animate-in fade-in">
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-bold text-[11px]">
+                        {rubricasSeleccionadas.size} seleccionada{rubricasSeleccionadas.size > 1 ? 's' : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmandoEliminarRubs(true)}
+                        disabled={isDeletingRubs}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                        title="Eliminar las rúbricas seleccionadas del catálogo"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Eliminar seleccionadas ({rubricasSeleccionadas.size})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRubricasSeleccionadas(new Set())}
+                        className="text-[11px] text-slate-500 hover:text-slate-700 font-medium cursor-pointer underline"
+                      >
+                        Cancelar selección
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Si solo hay 1 rúbrica o para búsqueda directa */}
+                {rubricas.length <= 1 && (
+                  <div className="relative w-full sm:w-64">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" aria-hidden="true" />
+                    <input
+                      type="text"
+                      value={searchRubricaQuery}
+                      onChange={(e) => setSearchRubricaQuery(e.target.value)}
+                      placeholder="Filtrar rúbricas..."
+                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-800 placeholder:text-slate-400 transition-all"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Lista de rúbricas con casillas de selección individual */}
+              <div className="space-y-3">
+                {rubricasFiltradas.map((rub) => {
+                  const acts = actividadesPorRubrica.get(rub.id) || [];
+                  const isSelected = rubricasSeleccionadas.has(rub.id);
+
+                  return (
                     <div
-                      onClick={() => setSelectedRubricaId(rub.id)}
-                      className="space-y-1.5 flex-1 cursor-pointer"
+                      key={rub.id}
+                      className={`p-4 sm:p-5 rounded-xl border transition-all shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+                        isSelected
+                          ? 'border-indigo-400 bg-indigo-50/40 ring-1 ring-indigo-400'
+                          : 'border-slate-200 bg-white hover:border-slate-300'
+                      }`}
                     >
-                      <div className="flex items-center gap-2.5 flex-wrap">
-                        <span className="text-xs font-mono text-slate-400">
-                          ID: {rub.id}
-                        </span>
-                        <h3 className="text-base font-bold text-slate-900 hover:text-indigo-600 transition-colors">
-                          {rub.titulo}
-                        </h3>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 uppercase">
-                          {rub.tipo || 'ACTIVIDAD'}
-                        </span>
-                      </div>
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        {/* Casilla de selección individual */}
+                        <div
+                          className="pt-0.5 shrink-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <label
+                            className="flex items-center cursor-pointer p-1 rounded-lg hover:bg-slate-100 transition-colors"
+                            title={`Seleccionar rúbrica ${rub.titulo}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                handleToggleRubrica(rub.id);
+                              }}
+                              className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                              aria-label={`Seleccionar rúbrica ${rub.titulo}`}
+                            />
+                          </label>
+                        </div>
 
-                      {rub.descripcion && (
-                        <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">
-                          {rub.descripcion}
-                        </p>
-                      )}
+                        <div
+                          onClick={() => setSelectedRubricaId(rub.id)}
+                          className="space-y-1.5 flex-1 cursor-pointer min-w-0"
+                        >
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="text-xs font-mono text-slate-400">
+                              ID: {rub.id}
+                            </span>
+                            <h3 className="text-base font-bold text-slate-900 hover:text-indigo-600 transition-colors">
+                              {rub.titulo}
+                            </h3>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 uppercase">
+                              {rub.tipo || 'ACTIVIDAD'}
+                            </span>
+                          </div>
 
-                      <div className="flex items-center gap-3 text-xs text-slate-500 pt-1">
-                        <span>
-                          Apartados: <strong className="text-slate-800">{rub.items.length}</strong>
-                        </span>
-                        <span>·</span>
-                        <span>
-                          Escala: <strong className="text-slate-800">{rub.niveles.length} niveles</strong>
-                        </span>
-                        {acts.length > 0 && (
-                          <>
+                          {rub.descripcion && (
+                            <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">
+                              {rub.descripcion}
+                            </p>
+                          )}
+
+                          <div className="flex items-center gap-3 text-xs text-slate-500 pt-1">
+                            <span>
+                              Apartados: <strong className="text-slate-800">{rub.items.length}</strong>
+                            </span>
                             <span>·</span>
                             <span>
-                              Actividades vinculadas: <strong className="text-slate-800">{acts.length}</strong>
+                              Escala: <strong className="text-slate-800">{rub.niveles.length} niveles</strong>
                             </span>
-                          </>
-                        )}
+                            {acts.length > 0 && (
+                              <>
+                                <span>·</span>
+                                <span>
+                                  Actividades vinculadas: <strong className="text-slate-800">{acts.length}</strong>
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Botones de acción directos: Evaluar, Ver matriz y Eliminar individual */}
+                      <div className="flex items-center gap-2 self-start md:self-center shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRubricaEvaluando(rub.raw);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-white bg-[#1e40af] hover:bg-[#1d4ed8] active:bg-[#1e3a8a] rounded-lg shadow-2xs transition-colors cursor-pointer"
+                          title={`Evaluar alumnos con ${rub.titulo}`}
+                        >
+                          <span>📊</span>
+                          <span>Evaluar</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedRubricaId(rub.id);
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors cursor-pointer"
+                          title="Ver matriz y detalles de la rúbrica"
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Ver matriz</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRubricasSeleccionadas(new Set([rub.id]));
+                            setConfirmandoEliminarRubs(true);
+                          }}
+                          className="inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                          title={`Eliminar rúbrica "${rub.titulo}"`}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
-
-                    {/* Botones de acción directos: Evaluar y Ver matriz */}
-                    <div className="flex items-center gap-2 self-start md:self-center shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRubricaEvaluando(rub.raw);
-                        }}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-white bg-[#1e40af] hover:bg-[#1d4ed8] active:bg-[#1e3a8a] rounded-lg shadow-2xs transition-colors cursor-pointer"
-                        title={`Evaluar alumnos con ${rub.titulo}`}
-                      >
-                        <span>📊</span>
-                        <span>Evaluar</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedRubricaId(rub.id);
-                        }}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors cursor-pointer"
-                        title="Ver matriz y detalles de la rúbrica"
-                      >
-                        <Pencil className="w-3.5 h-3.5 text-slate-500" />
-                        <span>Ver matriz</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           )}
         </>
@@ -499,6 +699,66 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             }
           }}
         />
+      )}
+
+      {/* ========================================================
+          7. MODAL DE CONFIRMACIÓN PARA ELIMINAR RÚBRICAS SELECCIONADAS
+          ======================================================== */}
+      {confirmandoEliminarRubs && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-100"
+        >
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4 animate-in zoom-in-95 duration-150 text-slate-800">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-900">
+                  ¿Eliminar {rubricasSeleccionadas.size} rúbrica{rubricasSeleccionadas.size > 1 ? 's' : ''}?
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Esta acción eliminará de forma permanente las <strong>{rubricasSeleccionadas.size}</strong> rúbricas seleccionadas del cuaderno docente.
+                  Las actividades asociadas se desvincularán de forma segura pero conservarán sus datos y notas en la tabla de evaluación.
+                </p>
+                <p className="text-[11px] text-rose-600 font-semibold">
+                  ⚠️ Esta acción no se puede deshacer.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 text-xs">
+              <button
+                type="button"
+                onClick={() => setConfirmandoEliminarRubs(false)}
+                disabled={isDeletingRubs}
+                className="px-4 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleEjecutarEliminarRubs}
+                disabled={isDeletingRubs}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                {isDeletingRubs ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Eliminando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Sí, eliminar {rubricasSeleccionadas.size} rúbrica{rubricasSeleccionadas.size > 1 ? 's' : ''}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

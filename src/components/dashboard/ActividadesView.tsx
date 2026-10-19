@@ -21,6 +21,7 @@ import {
   Sparkles,
   Award,
   Filter,
+  Trash2,
 } from 'lucide-react';
 import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion, CalificacionApartado } from '../../types';
 import { normalizeRubrica, NormalizedRubrica } from '../../utils/rubricaUtils';
@@ -47,7 +48,7 @@ interface TooltipData {
 }
 
 export const ActividadesView: React.FC = () => {
-  const { cuadernoData, selectedEvaluacion, setActiveTab } = useCuaderno();
+  const { cuadernoData, selectedEvaluacion, setActiveTab, eliminarActividades } = useCuaderno();
 
   // Caso A (Criterios) vs Caso B (Secciones)
   const [modoEvaluacion, setModoEvaluacion] = useState<'criterios' | 'secciones'>('criterios');
@@ -64,6 +65,12 @@ export const ActividadesView: React.FC = () => {
   // Filtros del catálogo de actividades
   const [filtroSeccion, setFiltroSeccion] = useState<string>('todas');
   const [soloPeriodoActual, setSoloPeriodoActual] = useState(false);
+
+  // Selección múltiple para eliminar actividades del catálogo
+  const [actividadesSeleccionadas, setActividadesSeleccionadas] = useState<Set<string>>(new Set());
+  const [confirmandoEliminarActs, setConfirmandoEliminarActs] = useState(false);
+  const [isDeletingActs, setIsDeletingActs] = useState(false);
+  const [deleteActsFeedback, setDeleteActsFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
   // Estado del Toolkit / Tooltip flotante con evidencias
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
@@ -498,6 +505,52 @@ export const ActividadesView: React.FC = () => {
     });
   }, [actividades, filtroSeccion, soloPeriodoActual, selectedEvaluacion]);
 
+  // Manejadores de selección múltiple para actividades del catálogo
+  const handleToggleActividad = (actId: string) => {
+    setActividadesSeleccionadas((prev) => {
+      const next = new Set(prev);
+      if (next.has(actId)) {
+        next.delete(actId);
+      } else {
+        next.add(actId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSeleccionarTodasActs = () => {
+    if (actividadesSeleccionadas.size === actividadesCatalogo.length && actividadesCatalogo.length > 0) {
+      setActividadesSeleccionadas(new Set());
+    } else {
+      setActividadesSeleccionadas(new Set(actividadesCatalogo.map((a) => a.id)));
+    }
+  };
+
+  const handleEjecutarEliminarActs = async () => {
+    if (actividadesSeleccionadas.size === 0) return;
+    setIsDeletingActs(true);
+    setDeleteActsFeedback(null);
+    try {
+      const ids = Array.from(actividadesSeleccionadas);
+      const res = await eliminarActividades(ids);
+      setActividadesSeleccionadas(new Set());
+      setConfirmandoEliminarActs(false);
+      setDeleteActsFeedback({
+        type: 'success',
+        message: `Se han eliminado correctamente ${res.eliminadas.length} actividad(es) y sus calificaciones asociadas.`,
+      });
+      setTimeout(() => setDeleteActsFeedback(null), 5000);
+    } catch (err: any) {
+      console.error('[ActividadesView] Error al eliminar actividades:', err);
+      setDeleteActsFeedback({
+        type: 'error',
+        message: err?.message || 'Error al eliminar actividades en el servidor.',
+      });
+    } finally {
+      setIsDeletingActs(false);
+    }
+  };
+
   // Manejador del Hover para abrir el Tooltip en la celda
   const handleCellMouseEnter = (
     e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>,
@@ -643,9 +696,9 @@ export const ActividadesView: React.FC = () => {
                   ? 'bg-white shadow-xs text-slate-900 font-bold'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
-              title="Ver las fichas detalladas de actividades"
+              title="Ver el catálogo de actividades con casillas de selección"
             >
-              Catálogo ({actividades.length})
+              Catálogo de Actividades ({actividades.length})
             </button>
           </div>
         </div>
@@ -1161,11 +1214,84 @@ export const ActividadesView: React.FC = () => {
       {/* 3. VISTA SECUNDARIA: CATÁLOGO DETALLADO DE ACTIVIDADES */}
       {vistaActiva === 'catalogo' && (
         <div className="space-y-4">
+          {/* Mensaje de feedback si hubo eliminación */}
+          {deleteActsFeedback && (
+            <div
+              className={`p-3 rounded-xl border flex items-center justify-between gap-2 text-xs animate-in fade-in ${
+                deleteActsFeedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {deleteActsFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                )}
+                <span className="font-medium">{deleteActsFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteActsFeedback(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3 flex-wrap">
               <span className="font-semibold text-slate-800">
-                Mostrando {actividadesCatalogo.length} de {actividades.length} actividades
+                Catálogo: Mostrando {actividadesCatalogo.length} de {actividades.length} actividades
               </span>
+
+              {/* Casilla de selección general: Seleccionar todas */}
+              {actividadesCatalogo.length > 0 && (
+                <label className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 cursor-pointer select-none text-[11px] font-semibold text-slate-700 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={
+                      actividadesCatalogo.length > 0 &&
+                      actividadesSeleccionadas.size === actividadesCatalogo.length
+                    }
+                    onChange={handleToggleSeleccionarTodasActs}
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <span>
+                    {actividadesSeleccionadas.size === actividadesCatalogo.length
+                      ? 'Deseleccionar todas'
+                      : `Seleccionar todas (${actividadesCatalogo.length})`}
+                  </span>
+                </label>
+              )}
+
+              {/* Botón de acción para eliminar seleccionadas */}
+              {actividadesSeleccionadas.size > 0 && (
+                <div className="flex items-center gap-2 animate-in fade-in">
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-bold text-[11px]">
+                    {actividadesSeleccionadas.size} seleccionada{actividadesSeleccionadas.size > 1 ? 's' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmandoEliminarActs(true)}
+                    disabled={isDeletingActs}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                    title="Eliminar las actividades seleccionadas del cuaderno"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar seleccionadas ({actividadesSeleccionadas.size})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActividadesSeleccionadas(new Set())}
+                    className="text-[11px] text-slate-500 hover:text-slate-700 font-medium cursor-pointer underline"
+                  >
+                    Cancelar selección
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -1228,14 +1354,33 @@ export const ActividadesView: React.FC = () => {
               {actividadesCatalogo.map((act) => {
                 const seccion = act.seccion_id ? seccionesMap.get(act.seccion_id) : null;
                 const esConfirmada = act.estadoVinculacion === 'rubrica_confirmada';
+                const isSelected = actividadesSeleccionadas.has(act.id);
 
                 return (
                   <div
                     key={act.id}
-                    className="p-4 rounded-xl border border-slate-200 bg-white hover:border-slate-300 transition-colors shadow-2xs space-y-2.5"
+                    className={`p-4 rounded-xl border transition-all shadow-2xs space-y-2.5 ${
+                      isSelected
+                        ? 'border-indigo-400 bg-indigo-50/40 ring-1 ring-indigo-400'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
+                    }`}
                   >
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        {/* Casilla de selección individual */}
+                        <label
+                          className="flex items-center cursor-pointer p-1 rounded-lg hover:bg-slate-100 transition-colors"
+                          title={`Seleccionar actividad ${act.nombre}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleActividad(act.id)}
+                            className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            aria-label={`Seleccionar actividad ${act.nombre}`}
+                          />
+                        </label>
+
                         <h4 className="text-sm font-bold text-slate-900">{act.nombre}</h4>
                         {act.tipo && (
                           <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200 uppercase">
@@ -1317,11 +1462,79 @@ export const ActividadesView: React.FC = () => {
                             Método: <span className="font-semibold text-slate-700">{act.metodo}</span>
                           </span>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActividadesSeleccionadas(new Set([act.id]));
+                            setConfirmandoEliminarActs(true);
+                          }}
+                          className="inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                          title={`Eliminar actividad "${act.nombre}"`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Modal de confirmación para eliminar actividades seleccionadas */}
+          {confirmandoEliminarActs && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-100"
+            >
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4 animate-in zoom-in-95 duration-150 text-slate-800">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                    <Trash2 className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-base font-bold text-slate-900">
+                      ¿Eliminar {actividadesSeleccionadas.size} actividad{actividadesSeleccionadas.size > 1 ? 'es' : ''}?
+                    </h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Esta acción eliminará de forma permanente las <strong>{actividadesSeleccionadas.size}</strong> actividades seleccionadas en el cuaderno y sus calificaciones asociadas.
+                    </p>
+                    <p className="text-[11px] text-rose-600 font-semibold">
+                      ⚠️ Esta acción no se puede deshacer.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmandoEliminarActs(false)}
+                    disabled={isDeletingActs}
+                    className="px-4 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-semibold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEjecutarEliminarActs}
+                    disabled={isDeletingActs}
+                    className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                  >
+                    {isDeletingActs ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <span>Eliminando...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Sí, eliminar {actividadesSeleccionadas.size} actividad{actividadesSeleccionadas.size > 1 ? 'es' : ''}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
