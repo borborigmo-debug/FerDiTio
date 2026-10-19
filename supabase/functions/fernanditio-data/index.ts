@@ -17,6 +17,7 @@ const ALLOWED_ORIGINS = [
   "https://ais-dev-xvmxpcqhfojwyhwcx3ymoc-404672769980.europe-west1.run.app",
   "https://ais-pre-xvmxpcqhfojwyhwcx3ymoc-404672769980.europe-west1.run.app",
   "https://ferditio.ai.studio",
+  "https://fernanditio.ai.studio",
   "http://localhost:3000",
 ];
 
