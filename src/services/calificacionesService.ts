@@ -601,3 +601,81 @@ export function limpiarRespaldoCalificacionesApartados(grupoId: string): void {
   }
 }
 
+/**
+ * Purga de forma segura las calificaciones asociadas a actividades eliminadas del respaldo local.
+ */
+export function purgarActividadesDeRespaldoLocal(grupoId: string, actividadIds: string[]): void {
+  if (!grupoId || !Array.isArray(actividadIds) || actividadIds.length === 0) return;
+  const setIds = new Set(actividadIds.map(String));
+
+  try {
+    const backupKeyCalifs = `${STORAGE_KEY_PREFIX}${grupoId}`;
+    const rawCalifs = localStorage.getItem(backupKeyCalifs);
+    if (rawCalifs) {
+      const parsed: Calificacion[] = JSON.parse(rawCalifs);
+      if (Array.isArray(parsed)) {
+        const filtradas = parsed.filter((c) => !setIds.has(String(c.actividad_id)));
+        if (filtradas.length === 0) {
+          localStorage.removeItem(backupKeyCalifs);
+        } else {
+          localStorage.setItem(backupKeyCalifs, JSON.stringify(filtradas));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[calificacionesService] Error al purgar actividades del respaldo local:', err);
+  }
+
+  try {
+    const backupKeyApartados = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+    const rawApartados = localStorage.getItem(backupKeyApartados);
+    if (rawApartados) {
+      const parsed: CalificacionApartado[] = JSON.parse(rawApartados);
+      if (Array.isArray(parsed)) {
+        const filtradas = parsed.filter((ca) => !ca.actividad_id || !setIds.has(String(ca.actividad_id)));
+        if (filtradas.length === 0) {
+          localStorage.removeItem(backupKeyApartados);
+        } else {
+          localStorage.setItem(backupKeyApartados, JSON.stringify(filtradas));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[calificacionesService] Error al purgar apartados del respaldo local:', err);
+  }
+}
+
+/**
+ * Purga de forma segura las calificaciones asociadas a rúbricas eliminadas del respaldo local.
+ */
+export function purgarRubricasDeRespaldoLocal(grupoId: string, rubricaIds: string[], actividadIds: string[] = []): void {
+  if (!grupoId) return;
+  const setRubIds = new Set(rubricaIds.map(String));
+  const setActIds = new Set(actividadIds.map(String));
+
+  if (setActIds.size > 0) {
+    purgarActividadesDeRespaldoLocal(grupoId, actividadIds);
+  }
+
+  try {
+    const backupKeyApartados = `${STORAGE_APARTADOS_KEY_PREFIX}${grupoId}`;
+    const rawApartados = localStorage.getItem(backupKeyApartados);
+    if (rawApartados) {
+      const parsed: CalificacionApartado[] = JSON.parse(rawApartados);
+      if (Array.isArray(parsed)) {
+        const filtradas = parsed.filter(
+          (ca) => (!ca.rubrica_id || !setRubIds.has(String(ca.rubrica_id))) &&
+                  (!ca.actividad_id || !setActIds.has(String(ca.actividad_id)))
+        );
+        if (filtradas.length === 0) {
+          localStorage.removeItem(backupKeyApartados);
+        } else {
+          localStorage.setItem(backupKeyApartados, JSON.stringify(filtradas));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[calificacionesService] Error al purgar rúbricas del respaldo local:', err);
+  }
+}
+

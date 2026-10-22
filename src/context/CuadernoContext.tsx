@@ -25,7 +25,7 @@ interface CuadernoContextValue {
   grupos: GrupoDocente[];
   selectedGrupoId: string | null;
   selectedGrupo: GrupoDocente | null;
-  selectGrupo: (grupoId: string, skipConfirm?: boolean) => Promise<boolean>;
+  selectGrupo: (grupoId: string, skipConfirm?: boolean, forceReload?: boolean) => Promise<boolean>;
   isLoadingGrupos: boolean;
   gruposError: string | null;
   refreshGrupos: () => Promise<void>;
@@ -40,14 +40,14 @@ interface CuadernoContextValue {
   cuadernoData: CuadernoGrupoData | null;
   isLoadingCuaderno: boolean;
   cuadernoError: string | null;
-  refreshCuaderno: () => Promise<void>;
+  refreshCuaderno: (forceReload?: boolean) => Promise<void>;
   updateCuadernoData: (newData: CuadernoGrupoData) => void;
   updateCalificaciones: (calificaciones: Calificacion[]) => void;
   updateCalificacionesApartados: (apartados: CalificacionApartado[]) => void;
   updateRubrica: (rubrica: Rubrica) => void;
   addRubricaYActividad: (rubrica: Rubrica, actividad: ActividadDetalle) => void;
   eliminarActividades: (actividadIds: string[]) => Promise<{ success: boolean; eliminadas: string[] }>;
-  eliminarRubricas: (rubricaIds: string[]) => Promise<{ success: boolean; eliminadas: string[] }>;
+  eliminarRubricas: (rubricaIds: string[]) => Promise<{ success: boolean; eliminadas: string[]; actividadesEliminadas: string[] }>;
 
   // Control de cambios no guardados
   hasUnsavedChanges: boolean;
@@ -260,7 +260,7 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Selección de grupo con protección de cambios y cancelación de peticiones previas
   const selectGrupo = useCallback(
-    async (grupoId: string, skipConfirm = false): Promise<boolean> => {
+    async (grupoId: string, skipConfirm = false, forceReload = false): Promise<boolean> => {
       if (!grupoId) return false;
 
       // 1. Verificación de cambios sin guardar
@@ -274,8 +274,8 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setHasUnsavedChanges(false);
       }
 
-      // 2. Si ya es el grupo seleccionado y tenemos datos, no recargar forzosamente
-      if (grupoId === selectedGrupoId && cuadernoData) {
+      // 2. Si ya es el grupo seleccionado y tenemos datos, no recargar forzosamente salvo que se indique forceReload
+      if (grupoId === selectedGrupoId && cuadernoData && !forceReload) {
         return true;
       }
 
@@ -334,10 +334,10 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [selectedGrupoId]);
 
-  // Recargar cuaderno del grupo activo
-  const refreshCuaderno = useCallback(async () => {
+  // Recargar cuaderno del grupo activo forzando actualización desde Supabase
+  const refreshCuaderno = useCallback(async (forceReload = true) => {
     if (!selectedGrupoId) return;
-    await selectGrupo(selectedGrupoId);
+    await selectGrupo(selectedGrupoId, true, forceReload);
   }, [selectedGrupoId, selectGrupo]);
 
   // Actualización de datos del cuaderno
@@ -403,13 +403,13 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const existsRubrica = rubricasPrevias.some((r) => r.id === nuevaRubrica.id);
         const rubricasActualizadas = existsRubrica
           ? rubricasPrevias.map((r) => (r.id === nuevaRubrica.id ? nuevaRubrica : r))
-          : [...rubricasPrevias, nuevaRubrica];
+          : [nuevaRubrica, ...rubricasPrevias];
 
         const actividadesPrevias = prev.actividades || [];
         const existsActividad = actividadesPrevias.some((a) => a.id === nuevaActividad.id);
         const actividadesActualizadas = existsActividad
           ? actividadesPrevias.map((a) => (a.id === nuevaActividad.id ? nuevaActividad : a))
-          : [...actividadesPrevias, nuevaActividad];
+          : [nuevaActividad, ...actividadesPrevias];
 
         return {
           ...prev,
@@ -470,29 +470,35 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setCuadernoData((prev) => {
         if (!prev) return null;
         const rubsRestantes = (prev.rubricas || []).filter((r) => !eliminadasSet.has(r.id));
-        const actsActualizadas = (prev.actividades || []).map((a) => {
+
+        // Identificar todas las actividades asociadas a las rúbricas eliminadas
+        const actsAsociadasIds = new Set<string>(res.actividadesEliminadas || []);
+        (prev.actividades || []).forEach((a) => {
           if (a.rubrica_id && eliminadasSet.has(a.rubrica_id)) {
-            return {
-              ...a,
-              rubrica_id: null,
-              estadoVinculacion: 'sin_rubrica' as const,
-              advertenciaRubrica: 'Rúbrica eliminada previamente',
-            };
+            actsAsociadasIds.add(a.id);
           }
-          return a;
         });
+
+        const actsRestantes = (prev.actividades || []).filter(
+          (a) => (!a.rubrica_id || !eliminadasSet.has(a.rubrica_id)) && !actsAsociadasIds.has(a.id)
+        );
+        const califsRestantes = (prev.calificaciones || []).filter(
+          (c) => !actsAsociadasIds.has(c.actividad_id)
+        );
         const apartadosRestantes = (prev.calificacionesApartados || []).filter(
-          (ca) => !eliminadasSet.has(ca.rubrica_id)
+          (ca) => !eliminadasSet.has(ca.rubrica_id) && (!ca.actividad_id || !actsAsociadasIds.has(ca.actividad_id))
         );
 
         return {
           ...prev,
           rubricas: rubsRestantes,
-          actividades: actsActualizadas,
+          actividades: actsRestantes,
+          calificaciones: califsRestantes,
           calificacionesApartados: apartadosRestantes,
           estadisticas: {
             ...prev.estadisticas,
             totalRubricas: rubsRestantes.length,
+            totalActividades: actsRestantes.length,
           },
         };
       });
@@ -569,7 +575,7 @@ export function useCuaderno(): CuadernoContextValue {
       updateRubrica: () => {},
       addRubricaYActividad: () => {},
       eliminarActividades: async () => ({ success: false, eliminadas: [] }),
-      eliminarRubricas: async () => ({ success: false, eliminadas: [] }),
+      eliminarRubricas: async () => ({ success: false, eliminadas: [], actividadesEliminadas: [] }),
       hasUnsavedChanges: false,
       setHasUnsavedChanges: () => {},
       connectionInfo: {

@@ -89,6 +89,9 @@ export interface Rubrica {
   tipo: string;
   descripcion?: string | null;
   items: RubricaItem[] | any;
+  created_at?: string;
+  updated_at?: string;
+  fecha?: string | null;
 }
 
 export interface Actividad {

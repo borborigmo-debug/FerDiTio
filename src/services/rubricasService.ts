@@ -6,6 +6,8 @@
 import { Rubrica, ActividadDetalle, RubricaItem } from '../types';
 import { parseRubricaItems, isValidUuid, asegurarApartadosConUuid, generateUuid } from '../utils/rubricaUtils';
 import { getCurrentIdToken } from './authService';
+import { registrarActividadesEliminadasLocal } from './gruposService';
+import { purgarRubricasDeRespaldoLocal } from './calificacionesService';
 
 const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
 
@@ -223,10 +225,14 @@ export async function crearRubricaYActividad(
 
   const rubricaRetornada: Rubrica = {
     ...data.rubrica,
+    created_at: data.rubrica.created_at || new Date().toISOString(),
     items: parseRubricaItems(data.rubrica.items),
   };
 
-  const actividadRetornada: ActividadDetalle = data.actividad;
+  const actividadRetornada: ActividadDetalle = {
+    ...data.actividad,
+    created_at: data.actividad.created_at || new Date().toISOString(),
+  };
 
     return {
     success: true,
@@ -241,6 +247,8 @@ export interface AnalisisRubricaGeminiParams {
   imagenBase64?: string;
   mimeType?: string;
   documentoTexto?: string;
+  criterios?: Array<{ id?: any; codigo: string; descripcion?: string }>;
+  grupoNombre?: string;
 }
 
 export interface ApartadoBorradorGemini {
@@ -268,12 +276,52 @@ export interface BorradorRubricaGemini {
 
 /**
  * Invoca el análisis asistido de rúbricas mediante Gemini a partir de foto o Word.
- * La llamada al backend se realiza de forma autenticada con token Firebase, verificando
- * en el servidor los criterios oficiales del grupo y depurando alucinaciones de la IA.
+ * Utiliza preferentemente la ruta server-side de la aplicación (/api/gemini/analizar-rubrica)
+ * con la SDK oficial @google/genai, y ofrece fallback resiliente.
  */
 export async function analizarRubricaConGemini(
   params: AnalisisRubricaGeminiParams
 ): Promise<BorradorRubricaGemini> {
+  // 1. Probar la ruta server-side de Express en la app
+  try {
+    const resLocal = await fetch('/api/gemini/analizar-rubrica', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        origen: params.origen,
+        imagenBase64: params.imagenBase64,
+        mimeType: params.mimeType,
+        documentoTexto: params.documentoTexto,
+        criterios: params.criterios || [],
+        grupoNombre: params.grupoNombre,
+      }),
+    });
+
+    if (resLocal.ok) {
+      const dataLocal = await resLocal.json();
+      if (dataLocal?.success && dataLocal?.borrador) {
+        return dataLocal.borrador;
+      }
+    } else {
+      let msg = '';
+      try {
+        const errJson = await resLocal.json();
+        msg = errJson?.error || '';
+      } catch {
+        // Ignorar
+      }
+      if (msg) {
+        console.warn('[analizarRubricaConGemini] Servidor devolvió error:', msg);
+      }
+    }
+  } catch (localErr) {
+    console.warn('[analizarRubricaConGemini] Endpoint local inaccesible, intentando Edge Function:', localErr);
+  }
+
+  // 2. Fallback a Supabase Edge Function
   const token = await getCurrentIdToken();
   if (!token) {
     throw new Error('No existe una sesión autenticada activa para comunicarse con el servidor.');
@@ -329,14 +377,46 @@ export async function analizarRubricaConGemini(
   return data.borrador;
 }
 
+const STORAGE_KEY_RUBRICAS_ELIMINADAS = 'fernanditio_rubricas_eliminadas_';
+
+export function getRubricasEliminadasLocal(grupoId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_KEY_RUBRICAS_ELIMINADAS}${grupoId}`);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        return new Set(arr.map(String));
+      }
+    }
+  } catch (err) {
+    console.warn('[rubricasService] Error al leer rúbricas eliminadas localmente:', err);
+  }
+  return new Set();
+}
+
+export function registrarRubricasEliminadasLocal(grupoId: string, rubricaIds: string[]): void {
+  try {
+    const current = getRubricasEliminadasLocal(grupoId);
+    rubricaIds.forEach((id) => current.add(String(id)));
+    localStorage.setItem(
+      `${STORAGE_KEY_RUBRICAS_ELIMINADAS}${grupoId}`,
+      JSON.stringify(Array.from(current))
+    );
+  } catch (err) {
+    console.warn('[rubricasService] Error al registrar rúbricas eliminadas localmente:', err);
+  }
+}
+
 /**
  * Elimina en lote rúbricas de un grupo autorizado en Supabase,
- * desvinculando automáticamente las actividades asociadas.
+ * eliminando también en cascada las actividades asociadas y sus calificaciones
+ * dependientes tanto en el servidor como en Fernanditio.
+ * Lanza error si la Edge Function no soporta la operación o falla; no simula éxito local.
  */
 export async function eliminarRubricasLote(
   grupoId: string,
   rubricaIds: string[]
-): Promise<{ success: boolean; eliminadas: string[] }> {
+): Promise<{ success: boolean; eliminadas: string[]; actividadesEliminadas: string[] }> {
   if (!grupoId || !Array.isArray(rubricaIds) || rubricaIds.length === 0) {
     throw new Error('Parámetros inválidos para eliminar rúbricas.');
   }
@@ -347,6 +427,7 @@ export async function eliminarRubricasLote(
   }
 
   const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+
   let response: Response;
   try {
     response = await fetch(endpoint, {
@@ -362,19 +443,47 @@ export async function eliminarRubricasLote(
         rubricaIds,
       }),
     });
-  } catch (err: any) {
-    throw new Error(`Error de red al conectar con el servidor: ${err?.message || err}`);
+  } catch (netErr: any) {
+    throw new Error(`Error de red al conectar con Supabase: ${netErr?.message || netErr}`);
   }
 
-  if (!response.ok) {
+  if (response.ok) {
+    const data = await response.json();
+    if (data?.success) {
+      const eliminadas = data.eliminadas || rubricaIds;
+      const actividadesEliminadas = data.actividadesEliminadas || [];
+      registrarRubricasEliminadasLocal(grupoId, eliminadas);
+      if (actividadesEliminadas.length > 0) {
+        registrarActividadesEliminadasLocal(grupoId, actividadesEliminadas);
+      }
+      purgarRubricasDeRespaldoLocal(grupoId, eliminadas, actividadesEliminadas);
+      return {
+        success: true,
+        eliminadas,
+        actividadesEliminadas,
+      };
+    }
+    throw new Error(data?.error || 'La operación en el servidor no devolvió confirmación de éxito.');
+  } else {
     let detalle = `HTTP ${response.status}: ${response.statusText}`;
     try {
       const errJson = await response.json();
       if (errJson?.error) detalle = errJson.error;
     } catch {}
-    throw new Error(detalle);
-  }
 
-  return await response.json();
+    if (
+      detalle.includes('Se requiere al menos una calificación para guardar o retirar') ||
+      detalle.includes('No se reconoce el tipo') ||
+      response.status === 404 ||
+      response.status === 501
+    ) {
+      throw new Error(
+        `La Edge Function remota de Supabase aún no tiene desplegada la operación 'eliminar_rubricas' (${detalle}). El cambio no se ha persistido en el servidor.`
+      );
+    }
+
+    throw new Error(`Error al eliminar rúbricas en el servidor: ${detalle}`);
+  }
 }
+
 

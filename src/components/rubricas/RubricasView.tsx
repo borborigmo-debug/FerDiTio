@@ -116,9 +116,10 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
       if (selectedRubricaId && res.eliminadas.includes(selectedRubricaId)) {
         setSelectedRubricaId(null);
       }
+      const cantActs = res.actividadesEliminadas?.length || 0;
       setDeleteRubsFeedback({
         type: 'success',
-        message: `Se han eliminado correctamente ${res.eliminadas.length} rúbrica(s) y se han desvinculado de las actividades del cuaderno.`,
+        message: `Se han eliminado correctamente ${res.eliminadas.length} rúbrica(s)${cantActs > 0 ? ` y ${cantActs} actividad(es) asociada(s)` : ''} en Supabase y Fernanditio.`,
       });
       setTimeout(() => setDeleteRubsFeedback(null), 5000);
     } catch (err: any) {
@@ -157,18 +158,51 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
     return map;
   }, [actividades]);
 
-  // Rúbricas filtradas por el buscador
+  // Rúbricas filtradas por el buscador (orden cronológico: más reciente primero)
   const rubricasFiltradas = useMemo(() => {
-    if (!searchRubricaQuery.trim()) return normalizedRubricas;
-    const q = searchRubricaQuery.trim().toLowerCase();
-    return normalizedRubricas.filter((r) => {
-      const matchTitulo = r.titulo.toLowerCase().includes(q);
-      const matchDesc = r.descripcion?.toLowerCase().includes(q) ?? false;
-      const matchCriterio = r.criteriosUnicos.some((c) => c.toLowerCase().includes(q));
-      const matchTipo = r.tipo.toLowerCase().includes(q);
-      return matchTitulo || matchDesc || matchCriterio || matchTipo;
+    let list = normalizedRubricas;
+    if (searchRubricaQuery.trim()) {
+      const q = searchRubricaQuery.trim().toLowerCase();
+      list = normalizedRubricas.filter((r) => {
+        const matchTitulo = r.titulo.toLowerCase().includes(q);
+        const matchDesc = r.descripcion?.toLowerCase().includes(q) ?? false;
+        const matchCriterio = r.criteriosUnicos.some((c) => c.toLowerCase().includes(q));
+        const matchTipo = r.tipo.toLowerCase().includes(q);
+        return matchTitulo || matchDesc || matchCriterio || matchTipo;
+      });
+    }
+
+    return list.slice().sort((a, b) => {
+      const parseTime = (dateVal: any): number => {
+        if (!dateVal) return 0;
+        const parsed = new Date(dateVal).getTime();
+        return isNaN(parsed) ? 0 : parsed;
+      };
+
+      const timeA = parseTime((a.raw as any)?.created_at) || parseTime((a.raw as any)?.fecha) || parseTime(a.created_at);
+      const timeB = parseTime((b.raw as any)?.created_at) || parseTime((b.raw as any)?.fecha) || parseTime(b.created_at);
+
+      const actsA = actividadesPorRubrica.get(a.id) || [];
+      const actsB = actividadesPorRubrica.get(b.id) || [];
+      const actTimeA = actsA.reduce((max, act) => {
+        const t = parseTime(act.created_at) || parseTime(act.fecha);
+        return Math.max(max, t);
+      }, 0);
+      const actTimeB = actsB.reduce((max, act) => {
+        const t = parseTime(act.created_at) || parseTime(act.fecha);
+        return Math.max(max, t);
+      }, 0);
+
+      const effectiveA = Math.max(timeA, actTimeA);
+      const effectiveB = Math.max(timeB, actTimeB);
+
+      if (effectiveA !== effectiveB) {
+        return effectiveB - effectiveA; // Más reciente primero
+      }
+
+      return 0;
     });
-  }, [normalizedRubricas, searchRubricaQuery]);
+  }, [normalizedRubricas, searchRubricaQuery, actividadesPorRubrica]);
 
   // Rúbrica seleccionada para ver su matriz completa
   const rubricaSeleccionada = selectedRubricaId
@@ -720,8 +754,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
                   ¿Eliminar {rubricasSeleccionadas.size} rúbrica{rubricasSeleccionadas.size > 1 ? 's' : ''}?
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Esta acción eliminará de forma permanente las <strong>{rubricasSeleccionadas.size}</strong> rúbricas seleccionadas del cuaderno docente.
-                  Las actividades asociadas se desvincularán de forma segura pero conservarán sus datos y notas en la tabla de evaluación.
+                  Esta acción eliminará de forma permanente las <strong>{rubricasSeleccionadas.size}</strong> rúbricas seleccionadas del cuaderno docente y <strong>todas las actividades y calificaciones asociadas</strong>, tanto en Fernanditio como en la base de datos de Supabase.
                 </p>
                 <p className="text-[11px] text-rose-600 font-semibold">
                   ⚠️ Esta acción no se puede deshacer.

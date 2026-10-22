@@ -3,7 +3,52 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Rubrica, RubricaItem } from '../types';
+import { Rubrica, RubricaItem, Criterio } from '../types';
+
+/**
+ * Comparador canónico para códigos de criterios (ej: "1.1", "1.2", ..., "9.2", "10.1", "10.2").
+ * Regla normativa: El 10.1 y el 10.2 deben aparecer en último lugar.
+ */
+export function compararCodigosCriterio(a: string, b: string): number {
+  const normA = (a || '').trim();
+  const normB = (b || '').trim();
+
+  if (normA === normB) return 0;
+
+  // Si uno de los dos es 10.1 o 10.2 (o empieza por 10.) y el otro no, 10.x va al final
+  const isDiezA = /^10(?:\.[0-9a-zA-Z]+)?$/i.test(normA) || normA === '10.1' || normA === '10.2';
+  const isDiezB = /^10(?:\.[0-9a-zA-Z]+)?$/i.test(normB) || normB === '10.1' || normB === '10.2';
+
+  if (isDiezA && !isDiezB) return 1; // A va al final
+  if (!isDiezA && isDiezB) return -1; // B va al final
+
+  // Si ambos son 10.x o ninguno es 10.x, descomponer numéricamente
+  const matchA = normA.match(/^(\d+)(?:\.(\d+))?(.*)$/);
+  const matchB = normB.match(/^(\d+)(?:\.(\d+))?(.*)$/);
+
+  if (matchA && matchB) {
+    const majorA = parseInt(matchA[1], 10);
+    const majorB = parseInt(matchB[1], 10);
+    if (majorA !== majorB) return majorA - majorB;
+
+    const minorA = matchA[2] !== undefined ? parseInt(matchA[2], 10) : 0;
+    const minorB = matchB[2] !== undefined ? parseInt(matchB[2], 10) : 0;
+    if (minorA !== minorB) return minorA - minorB;
+
+    return (matchA[3] || '').localeCompare(matchB[3] || '');
+  }
+
+  // Fallback con orden natural alfanumérico
+  return normA.localeCompare(normB, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Comparador para objetos Criterio basado en su código oficial,
+ * garantizando que el 10.1 y el 10.2 aparezcan en último lugar.
+ */
+export function compararCriterios(a: Criterio, b: Criterio): number {
+  return compararCodigosCriterio(a?.codigo || '', b?.codigo || '');
+}
 
 export interface NormalizedRubricaItem {
   id: string; // Clave para renderizado determinista y estado local en UI (React key o visualId)
@@ -28,6 +73,9 @@ export interface NormalizedRubrica {
   niveles: string[];
   sumaPesos: number | null;
   criteriosUnicos: string[];
+  created_at?: string;
+  updated_at?: string;
+  fecha?: string | null;
   raw: Rubrica;
 }
 
@@ -405,7 +453,10 @@ export function normalizeRubrica(rubrica: Rubrica): NormalizedRubrica {
     items,
     niveles: nivelesOrdenados,
     sumaPesos: hayPesosNumericos ? Math.round(sumaPesosCalculada * 100) / 100 : null,
-    criteriosUnicos: Array.from(uniqueCriteriosSet),
+    criteriosUnicos: Array.from(uniqueCriteriosSet).sort(compararCodigosCriterio),
+    created_at: rubrica.created_at,
+    updated_at: rubrica.updated_at,
+    fecha: rubrica.fecha,
     raw: rubrica,
   };
 }

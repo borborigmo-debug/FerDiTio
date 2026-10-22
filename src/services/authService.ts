@@ -67,7 +67,16 @@ export async function signOutUser(): Promise<void> {
  * @param forceRefresh Fuerza la renovación del token si está próximo a expirar
  * @returns Token JWT de Firebase firmado por Google o null si no hay sesión
  */
+let testIdTokenProvider: (() => Promise<string | null>) | null = null;
+
+export function _setTestIdTokenProvider(fn: (() => Promise<string | null>) | null): void {
+  testIdTokenProvider = fn;
+}
+
 export async function getCurrentIdToken(forceRefresh = false): Promise<string | null> {
+  if (testIdTokenProvider) {
+    return testIdTokenProvider();
+  }
   if (!auth || !auth.currentUser) {
     return null;
   }

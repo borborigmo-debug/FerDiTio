@@ -212,6 +212,133 @@ serve(async (req: Request) => {
         );
       }
 
+      // =========================================================================
+      // GESTIÓN DE CURSOS (GRUPOS) A NIVEL DE PROFESOR
+      // =========================================================================
+      if (body?.tipo === 'crear_grupo') {
+        const rawNombre = typeof body?.nombre === 'string' ? body.nombre.trim() : '';
+        if (!rawNombre || rawNombre.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El nombre del curso es obligatorio (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const nuevoGrupoId = crypto.randomUUID().toLowerCase();
+        const { data: nuevoGrupo, error: insertError } = await supabase
+          .from("grupos")
+          .insert({
+            id: nuevoGrupoId,
+            profesor_id: profesor.id,
+            nombre: rawNombre,
+            oculto: false,
+          })
+          .select("id, profesor_id, nombre, oculto, created_at, updated_at")
+          .single();
+
+        if (insertError) {
+          return new Response(
+            JSON.stringify({ error: `Error al crear el curso en Supabase: ${insertError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, grupo: nuevoGrupo }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'eliminar_grupos') {
+        const grupoIds = Array.isArray(body?.grupoIds)
+          ? body.grupoIds.map((id: any) => String(id).trim()).filter(Boolean)
+          : (typeof body?.grupoId === 'string' && body.grupoId.trim() ? [body.grupoId.trim()] : []);
+
+        if (grupoIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe indicar al menos un curso a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Verificar pertenencia al profesor autenticado
+        const { data: gruposDocente, error: gError } = await supabase
+          .from("grupos")
+          .select("id, nombre")
+          .eq("profesor_id", profesor.id)
+          .in("id", grupoIds);
+
+        if (gError) {
+          return new Response(
+            JSON.stringify({ error: `Error al consultar cursos: ${gError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const validIds = (gruposDocente || []).map((g: any) => g.id);
+        if (validIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguno de los cursos seleccionados pertenece a este docente." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobación estricta de dependencias: alumnos, actividades, criterios, rubricas, calificaciones
+        const dependenciasPorGrupo: Record<string, string[]> = {};
+        for (const g of gruposDocente || []) {
+          const deps: string[] = [];
+          const [alumnosRes, actsRes, critsRes, rubsRes, califsRes] = await Promise.all([
+            supabase.from("alumnos").select("id", { count: "exact", head: true }).eq("grupo_id", g.id),
+            supabase.from("actividades").select("id", { count: "exact", head: true }).eq("grupo_id", g.id),
+            supabase.from("criterios").select("id", { count: "exact", head: true }).eq("grupo_id", g.id),
+            supabase.from("rubricas").select("id", { count: "exact", head: true }).eq("grupo_id", g.id),
+            supabase.from("calificaciones").select("id", { count: "exact", head: true }).eq("grupo_id", g.id),
+          ]);
+
+          if ((alumnosRes.count ?? 0) > 0) deps.push(`${alumnosRes.count} alumno(s)`);
+          if ((actsRes.count ?? 0) > 0) deps.push(`${actsRes.count} actividad(es)`);
+          if ((critsRes.count ?? 0) > 0) deps.push(`${critsRes.count} criterio(s)`);
+          if ((rubsRes.count ?? 0) > 0) deps.push(`${rubsRes.count} rúbrica(s)`);
+          if ((califsRes.count ?? 0) > 0) deps.push(`${califsRes.count} calificación(es)`);
+
+          if (deps.length > 0) {
+            dependenciasPorGrupo[g.nombre] = deps;
+          }
+        }
+
+        if (Object.keys(dependenciasPorGrupo).length > 0) {
+          const detalles = Object.entries(dependenciasPorGrupo)
+            .map(([nombre, deps]) => `«${nombre}» contiene ${deps.join(', ')}`)
+            .join('; ');
+          return new Response(
+            JSON.stringify({
+              error: `No se pueden eliminar los cursos porque contienen dependencias activas: ${detalles}. Debe eliminar primero los alumnos, actividades o rúbricas asociadas antes de borrar el curso de forma segura.`,
+              dependencias: dependenciasPorGrupo,
+            }),
+            { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Si están limpios de dependencias, proceder a eliminar
+        const { error: delError } = await supabase
+          .from("grupos")
+          .delete()
+          .eq("profesor_id", profesor.id)
+          .in("id", validIds);
+
+        if (delError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar cursos en Supabase: ${delError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, eliminados: validIds }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       const targetGrupoId = typeof body?.grupoId === "string" ? body.grupoId.trim() : "";
       if (!targetGrupoId) {
         return new Response(
@@ -220,23 +347,717 @@ serve(async (req: Request) => {
         );
       }
 
+      // Verificación de propiedad del grupo por defecto para el resto de operaciones
+      const { data: grupo, error: grupoError } = await supabase
+        .from("grupos")
+        .select("id, profesor_id, nombre")
+        .eq("id", targetGrupoId)
+        .eq("profesor_id", profesor.id)
+        .maybeSingle();
+
+      if (grupoError || !grupo) {
+        return new Response(
+          JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // GESTIÓN DE DATOS: ALUMNOS
+      // =========================================================================
+      if (body?.tipo === 'crear_alumno') {
+        const nombre = typeof body?.nombre === 'string' ? body.nombre.trim() : '';
+        if (!nombre || nombre.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El nombre del alumno es obligatorio (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let orden = typeof body?.orden === 'number' && !isNaN(body.orden) ? body.orden : null;
+        if (orden === null) {
+          const { data: maxOrdenData } = await supabase
+            .from("alumnos")
+            .select("orden")
+            .eq("grupo_id", grupo.id)
+            .order("orden", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          orden = (maxOrdenData?.orden ?? 0) + 1;
+        }
+
+        const nuevoAlumnoId = crypto.randomUUID().toLowerCase();
+        const { data: nuevoAlumno, error: insError } = await supabase
+          .from("alumnos")
+          .insert({
+            id: nuevoAlumnoId,
+            grupo_id: grupo.id,
+            nombre,
+            orden,
+          })
+          .select("id, grupo_id, nombre, orden, created_at")
+          .single();
+
+        if (insError) {
+          return new Response(
+            JSON.stringify({ error: `Error al crear alumno en Supabase: ${insError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, alumno: nuevoAlumno }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'actualizar_alumno') {
+        const alumnoId = typeof body?.alumnoId === 'string' ? body.alumnoId.trim() : '';
+        const nombre = typeof body?.nombre === 'string' ? body.nombre.trim() : '';
+        if (!alumnoId) {
+          return new Response(
+            JSON.stringify({ error: "ID de alumno no especificado." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        if (!nombre || nombre.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El nombre del alumno no puede estar vacío (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const updateData: Record<string, any> = { nombre };
+        if (typeof body?.orden === 'number' && !isNaN(body.orden)) {
+          updateData.orden = body.orden;
+        }
+
+        const { data: alumnoAct, error: actError } = await supabase
+          .from("alumnos")
+          .update(updateData)
+          .eq("id", alumnoId)
+          .eq("grupo_id", grupo.id)
+          .select("id, grupo_id, nombre, orden, created_at")
+          .single();
+
+        if (actError) {
+          return new Response(
+            JSON.stringify({ error: `Error al actualizar alumno: ${actError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, alumno: alumnoAct }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'eliminar_alumnos') {
+        const alumnoIds = Array.isArray(body?.alumnoIds)
+          ? body.alumnoIds.map((id: any) => String(id).trim()).filter(Boolean)
+          : [];
+
+        if (alumnoIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe indicar al menos un alumno a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobar pertenencia al grupo
+        const { data: alumnosValidos, error: valError } = await supabase
+          .from("alumnos")
+          .select("id, nombre")
+          .eq("grupo_id", grupo.id)
+          .in("id", alumnoIds);
+
+        if (valError) {
+          return new Response(
+            JSON.stringify({ error: `Error al comprobar alumnos: ${valError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const validIds = (alumnosValidos || []).map((a: any) => a.id);
+        if (validIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguno de los alumnos seleccionados pertenece a este curso." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobación de dependencias: calificaciones estándar y calificaciones de apartados
+        const [califsRes, califsApRes] = await Promise.all([
+          supabase.from("calificaciones").select("alumno_id").eq("grupo_id", grupo.id).in("alumno_id", validIds),
+          supabase.from("calificaciones_apartados").select("alumno_id").eq("grupo_id", grupo.id).in("alumno_id", validIds),
+        ]);
+
+        const idsConCalifs = new Set<string>();
+        (califsRes.data || []).forEach((c: any) => idsConCalifs.add(c.alumno_id));
+        (califsApRes.data || []).forEach((c: any) => idsConCalifs.add(c.alumno_id));
+
+        if (idsConCalifs.size > 0) {
+          const nombresConNota = (alumnosValidos || [])
+            .filter((a: any) => idsConCalifs.has(a.id))
+            .map((a: any) => a.nombre);
+          return new Response(
+            JSON.stringify({
+              error: `No se pueden eliminar los siguientes alumnos porque tienen calificaciones y evidencias de evaluación registradas en el cuaderno: ${nombresConNota.join(', ')}. Para salvaguardar la integridad de las evaluaciones, no se permite eliminar alumnos calificados.`,
+              bloqueados: Array.from(idsConCalifs),
+            }),
+            { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Si ninguno tiene calificaciones, eliminación segura
+        const { error: delAlumnosError } = await supabase
+          .from("alumnos")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("id", validIds);
+
+        if (delAlumnosError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar alumnos: ${delAlumnosError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, eliminados: validIds }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'importar_alumnos') {
+        const alumnosList = Array.isArray(body?.alumnos) ? body.alumnos : [];
+        if (alumnosList.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "No se proporcionaron alumnos para importar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: maxOrdenData } = await supabase
+          .from("alumnos")
+          .select("orden")
+          .eq("grupo_id", grupo.id)
+          .order("orden", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        let currentOrden = maxOrdenData?.orden ?? 0;
+
+        const filasParaInsertar = [];
+        for (const item of alumnosList) {
+          const nombre = typeof item?.nombre === 'string' ? item.nombre.trim() : '';
+          if (!nombre) continue;
+          currentOrden += 1;
+          const orden = typeof item?.orden === 'number' && !isNaN(item.orden) ? item.orden : currentOrden;
+          filasParaInsertar.push({
+            id: crypto.randomUUID().toLowerCase(),
+            grupo_id: grupo.id,
+            nombre,
+            orden,
+          });
+        }
+
+        if (filasParaInsertar.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguna de las filas proporcionadas contiene un nombre válido de alumno." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: insertados, error: insLoteError } = await supabase
+          .from("alumnos")
+          .insert(filasParaInsertar)
+          .select("id, grupo_id, nombre, orden, created_at");
+
+        if (insLoteError) {
+          return new Response(
+            JSON.stringify({ error: `Error al importar alumnos en Supabase: ${insLoteError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, total: (insertados || []).length, alumnos: insertados || [] }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // GESTIÓN DE DATOS: CRITERIOS DE EVALUACIÓN
+      // =========================================================================
+      if (body?.tipo === 'crear_criterio') {
+        const codigo = typeof body?.codigo === 'string' ? body.codigo.trim() : '';
+        const descripcion = typeof body?.descripcion === 'string' ? body.descripcion.trim() : '';
+        if (!codigo) {
+          return new Response(
+            JSON.stringify({ error: "El código de criterio es obligatorio (ej. 1.1, 2.3)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        if (!descripcion) {
+          return new Response(
+            JSON.stringify({ error: "La descripción del criterio es obligatoria." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let ponderacion: number | null = null;
+        if (body?.ponderacion !== null && body?.ponderacion !== undefined && body?.ponderacion !== '') {
+          const numPond = Number(body.ponderacion);
+          if (isNaN(numPond) || numPond < 0) {
+            return new Response(
+              JSON.stringify({ error: "La ponderación debe ser un número mayor o igual a 0." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          ponderacion = numPond;
+        }
+
+        // Comprobar unicidad de código dentro del grupo
+        const { data: existeCod } = await supabase
+          .from("criterios")
+          .select("id")
+          .eq("grupo_id", grupo.id)
+          .eq("codigo", codigo)
+          .maybeSingle();
+
+        if (existeCod) {
+          return new Response(
+            JSON.stringify({ error: `Ya existe un criterio con el código ${codigo} en este curso.` }),
+            { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: nuevoCriterio, error: insCritError } = await supabase
+          .from("criterios")
+          .insert({
+            grupo_id: grupo.id,
+            codigo,
+            descripcion,
+            ponderacion,
+          })
+          .select("id, grupo_id, codigo, descripcion, ponderacion")
+          .single();
+
+        if (insCritError) {
+          return new Response(
+            JSON.stringify({ error: `Error al crear criterio: ${insCritError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, criterio: nuevoCriterio }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'actualizar_criterio') {
+        const criterioId = Number(body?.criterioId);
+        if (isNaN(criterioId) || !criterioId) {
+          return new Response(
+            JSON.stringify({ error: "ID de criterio inválido." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const codigo = typeof body?.codigo === 'string' ? body.codigo.trim() : '';
+        const descripcion = typeof body?.descripcion === 'string' ? body.descripcion.trim() : '';
+        if (!codigo || !descripcion) {
+          return new Response(
+            JSON.stringify({ error: "El código y la descripción del criterio son obligatorios." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let ponderacion: number | null = null;
+        if (body?.ponderacion !== null && body?.ponderacion !== undefined && body?.ponderacion !== '') {
+          const numPond = Number(body.ponderacion);
+          if (isNaN(numPond) || numPond < 0) {
+            return new Response(
+              JSON.stringify({ error: "La ponderación debe ser un número no negativo." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          ponderacion = numPond;
+        }
+
+        const { data: criterioAct, error: actCritError } = await supabase
+          .from("criterios")
+          .update({
+            codigo,
+            descripcion,
+            ponderacion,
+          })
+          .eq("id", criterioId)
+          .eq("grupo_id", grupo.id)
+          .select("id, grupo_id, codigo, descripcion, ponderacion")
+          .single();
+
+        if (actCritError) {
+          return new Response(
+            JSON.stringify({ error: `Error al actualizar criterio: ${actCritError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, criterio: criterioAct }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'actualizar_ponderacion_criterio') {
+        const criterioId = Number(body?.criterioId);
+        if (isNaN(criterioId) || !criterioId) {
+          return new Response(
+            JSON.stringify({ error: "ID de criterio inválido." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let ponderacion: number | null = null;
+        if (body?.ponderacion !== null && body?.ponderacion !== undefined && body?.ponderacion !== '') {
+          const numPond = Number(body.ponderacion);
+          if (isNaN(numPond) || numPond < 0) {
+            return new Response(
+              JSON.stringify({ error: "La ponderación no puede ser negativa ni contener caracteres no numéricos." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          ponderacion = numPond;
+        }
+
+        const { data: criterioAct, error: actPondError } = await supabase
+          .from("criterios")
+          .update({ ponderacion })
+          .eq("id", criterioId)
+          .eq("grupo_id", grupo.id)
+          .select("id, grupo_id, codigo, descripcion, ponderacion")
+          .single();
+
+        if (actPondError) {
+          return new Response(
+            JSON.stringify({ error: `Error al actualizar ponderación en Supabase: ${actPondError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, criterio: criterioAct }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'eliminar_criterios') {
+        const criterioIds = Array.isArray(body?.criterioIds)
+          ? body.criterioIds.map(Number).filter((n: number) => !isNaN(n) && n > 0)
+          : [];
+
+        if (criterioIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe indicar al menos un criterio a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: critsValidos, error: valCritsError } = await supabase
+          .from("criterios")
+          .select("id, codigo")
+          .eq("grupo_id", grupo.id)
+          .in("id", criterioIds);
+
+        if (valCritsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al consultar criterios: ${valCritsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const validIds = (critsValidos || []).map((c: any) => c.id);
+        const codigosAEliminar = new Set((critsValidos || []).map((c: any) => c.codigo.trim().toLowerCase()));
+
+        if (validIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguno de los criterios seleccionados pertenece a este curso." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobación de dependencias: revisar rúbricas del grupo
+        const { data: rubsGrupo } = await supabase
+          .from("rubricas")
+          .select("id, titulo, items")
+          .eq("grupo_id", grupo.id);
+
+        const codigosEnUso: Record<string, string[]> = {};
+        for (const rub of rubsGrupo || []) {
+          const items = Array.isArray(rub.items) ? rub.items : [];
+          for (const it of items) {
+            const listCriterios = Array.isArray(it?.criterios)
+              ? it.criterios
+              : (typeof it?.criterio === 'string' ? [it.criterio] : []);
+            for (const cod of listCriterios) {
+              const codLower = String(cod || '').trim().toLowerCase();
+              if (codigosAEliminar.has(codLower)) {
+                if (!codigosEnUso[cod]) codigosEnUso[cod] = [];
+                if (!codigosEnUso[cod].includes(rub.titulo)) {
+                  codigosEnUso[cod].push(rub.titulo);
+                }
+              }
+            }
+          }
+        }
+
+        if (Object.keys(codigosEnUso).length > 0) {
+          const detalles = Object.entries(codigosEnUso)
+            .map(([cod, rubs]) => `Criterio ${cod} en ${rubs.join(', ')}`)
+            .join('; ');
+          return new Response(
+            JSON.stringify({
+              error: `No se pueden eliminar los criterios seleccionados porque están siendo evaluados en las siguientes rúbricas: ${detalles}. Desvincúlelos o elimine las rúbricas antes de borrar los criterios.`,
+              bloqueados: Object.keys(codigosEnUso),
+            }),
+            { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { error: delCritsError } = await supabase
+          .from("criterios")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("id", validIds);
+
+        if (delCritsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar criterios: ${delCritsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, eliminados: validIds }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'importar_criterios') {
+        const criteriosList = Array.isArray(body?.criterios) ? body.criterios : [];
+        if (criteriosList.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "No se proporcionaron criterios para importar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const filasParaInsertar = [];
+        for (const item of criteriosList) {
+          const codigo = typeof item?.codigo === 'string' ? item.codigo.trim() : '';
+          const descripcion = typeof item?.descripcion === 'string' ? item.descripcion.trim() : '';
+          if (!codigo || !descripcion) continue;
+
+          let ponderacion: number | null = null;
+          if (item?.ponderacion !== null && item?.ponderacion !== undefined && item?.ponderacion !== '') {
+            const numPond = Number(item.ponderacion);
+            if (!isNaN(numPond) && numPond >= 0) {
+              ponderacion = numPond;
+            }
+          }
+
+          filasParaInsertar.push({
+            grupo_id: grupo.id,
+            codigo,
+            descripcion,
+            ponderacion,
+          });
+        }
+
+        if (filasParaInsertar.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguna de las filas contiene código y descripción válidos." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const { data: insertados, error: insLoteError } = await supabase
+          .from("criterios")
+          .insert(filasParaInsertar)
+          .select("id, grupo_id, codigo, descripcion, ponderacion");
+
+        if (insLoteError) {
+          return new Response(
+            JSON.stringify({ error: `Error al importar criterios en Supabase: ${insLoteError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, total: (insertados || []).length, criterios: insertados || [] }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // GESTIÓN DE DATOS: SECCIONES
+      // =========================================================================
+      if (body?.tipo === 'crear_seccion') {
+        const nombre = typeof body?.nombre === 'string' ? body.nombre.trim() : '';
+        if (!nombre || nombre.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El nombre de la sección es obligatorio (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const color = typeof body?.color === 'string' && body.color.trim() ? body.color.trim() : null;
+        const nuevaSeccionId = crypto.randomUUID().toLowerCase();
+
+        const { data: nuevaSeccion, error: insSecError } = await supabase
+          .from("secciones")
+          .insert({
+            id: nuevaSeccionId,
+            grupo_id: grupo.id,
+            nombre,
+            color,
+            ponderacion: null, // Las secciones son organizativas; no intervienen en el cálculo de notas
+            oculto: false,
+          })
+          .select("id, grupo_id, nombre, color, ponderacion, oculto")
+          .single();
+
+        if (insSecError) {
+          return new Response(
+            JSON.stringify({ error: `Error al crear sección en Supabase: ${insSecError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, seccion: nuevaSeccion }),
+          { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'actualizar_seccion') {
+        const seccionId = typeof body?.seccionId === 'string' ? body.seccionId.trim() : '';
+        const nombre = typeof body?.nombre === 'string' ? body.nombre.trim() : '';
+        if (!seccionId) {
+          return new Response(
+            JSON.stringify({ error: "ID de sección no especificado." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        if (!nombre || nombre.length < 2) {
+          return new Response(
+            JSON.stringify({ error: "El nombre de la sección no puede estar vacío (mínimo 2 caracteres)." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const color = typeof body?.color === 'string' && body.color.trim() ? body.color.trim() : null;
+
+        const { data: seccionAct, error: actSecError } = await supabase
+          .from("secciones")
+          .update({ nombre, color })
+          .eq("id", seccionId)
+          .eq("grupo_id", grupo.id)
+          .select("id, grupo_id, nombre, color, ponderacion, oculto")
+          .single();
+
+        if (actSecError) {
+          return new Response(
+            JSON.stringify({ error: `Error al actualizar sección: ${actSecError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, seccion: seccionAct }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (body?.tipo === 'eliminar_secciones') {
+        const seccionIds = Array.isArray(body?.seccionIds)
+          ? body.seccionIds.map((id: any) => String(id).trim()).filter(Boolean)
+          : [];
+
+        if (seccionIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Debe indicar al menos una sección a eliminar." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobar pertenencia al grupo
+        const { data: secsValidas, error: valSecsError } = await supabase
+          .from("secciones")
+          .select("id, nombre")
+          .eq("grupo_id", grupo.id)
+          .in("id", seccionIds);
+
+        if (valSecsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al comprobar secciones: ${valSecsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const validIds = (secsValidas || []).map((s: any) => s.id);
+        if (validIds.length === 0) {
+          return new Response(
+            JSON.stringify({ error: "Ninguna de las secciones seleccionadas pertenece a este curso." }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Comprobación de dependencias: actividades asignadas a estas secciones
+        const { data: actsVinculadas } = await supabase
+          .from("actividades")
+          .select("id, nombre, seccion_id")
+          .eq("grupo_id", grupo.id)
+          .in("seccion_id", validIds);
+
+        if (actsVinculadas && actsVinculadas.length > 0) {
+          const nombresActs = actsVinculadas.map((a: any) => `«${a.nombre}»`).slice(0, 5);
+          const masTexto = actsVinculadas.length > 5 ? ` y ${actsVinculadas.length - 5} más` : '';
+          return new Response(
+            JSON.stringify({
+              error: `No se pueden eliminar las secciones seleccionadas porque contienen ${actsVinculadas.length} actividad(es) vinculada(s) (${nombresActs.join(', ')}${masTexto}). Por seguridad y para no desorganizar las actividades existentes, reasigne o elimine primero las actividades asociadas.`,
+              actividadesVinculadas: actsVinculadas.map((a: any) => a.id),
+            }),
+            { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Si no tienen actividades vinculadas, eliminación segura
+        const { error: delSecsError } = await supabase
+          .from("secciones")
+          .delete()
+          .eq("grupo_id", grupo.id)
+          .in("id", validIds);
+
+        if (delSecsError) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar secciones: ${delSecsError.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ success: true, eliminadas: validIds }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       // Comprobación de si es petición para crear una nueva rúbrica y su actividad vinculada
       const isCrearRubrica = body?.tipo === 'crear_rubrica';
       if (isCrearRubrica) {
-        // 1. Verificación de propiedad del grupo
-        const { data: grupo, error: grupoError } = await supabase
-          .from("grupos")
-          .select("id, profesor_id")
-          .eq("id", targetGrupoId)
-          .eq("profesor_id", profesor.id)
-          .maybeSingle();
-
-        if (grupoError || !grupo) {
-          return new Response(
-            JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
-            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
 
         // 2. Validación de título
         const rawTitulo = typeof body?.titulo === 'string' ? body.titulo.trim() : '';
@@ -461,8 +1282,9 @@ REGLAS OBLIGATORIAS:
 2. Está TERMINANTEMENTE PROHIBIDO inventar códigos, añadir sufijos, cambiar letras o utilizar criterios de otras materias o comunidades autónomas.
 3. Si un apartado o indicador no menciona un criterio explícito o no se puede establecer una relación clara e inequívoca con la lista oficial, DEBES DEVOLVER una lista vacía de criterios para ese apartado: "criterios": []. El docente se encargará de asignarlo manualmente en la pantalla de revisión.
 4. Identifica el título general de la rúbrica y sugiere el tipo evaluativo más apropiado: "ACTIVIDAD", "TRABAJO" o "EXAMEN".
-5. Extrae los apartados evaluables identificados (mínimo 1). Para cada apartado:
-   - "titulo": título claro y conciso del indicador o aspecto evaluado.
+5. Extrae los apartados o actividades evaluables identificados (mínimo 1). Para cada uno:
+   - "numero": el número o identificador EXACTO que figura en el documento o fotografía (por ejemplo "5.a", "5.b", "2", "3.1"). NUNCA empieces obligatoriamente por el 1 si el examen o rúbrica original empieza por otra numeración.
+   - "titulo": comienzo y enunciado claro del indicador o aspecto evaluado.
    - "peso": peso porcentual sugerido (1 a 100). Si la rúbrica original no especifica pesos, reparte equitativamente o sugiere un valor coherente.
    - "criterios": array de códigos oficiales coincidentes (o [] si no hay coincidencia exacta).
    - "descriptores": objeto con exactamente 4 niveles de desempeño numéricos del '1' al '4':
@@ -482,7 +1304,7 @@ REGLAS OBLIGATORIAS:
           });
         }
         parts.push({
-          text: promptInstrucciones + (origen === "word" ? `\n\nCONTENIDO EXTRAÍDO DEL DOCUMENTO WORD:\n${documentoTexto}` : "\n\nAnaliza la fotografía de la rúbrica adjunta y devuelve el JSON estructurado."),
+          text: promptInstrucciones + (origen === "word" ? `\n\nCONTENIDO EXTRAÍDO DEL DOCUMENTO WORD:\n${documentoTexto}` : "\n\nAnaliza la fotografía de la rúbrica adjunta y devuelve el JSON estructurado respetando la numeración original de los apartados."),
         });
 
         const geminiRequestBody = {
@@ -506,6 +1328,7 @@ REGLAS OBLIGATORIAS:
                   items: {
                     type: "OBJECT",
                     properties: {
+                      numero: { type: "STRING" },
                       titulo: { type: "STRING" },
                       peso: { type: "NUMBER" },
                       criterios: {
@@ -588,10 +1411,24 @@ REGLAS OBLIGATORIAS:
             .map((c: any) => String(c).trim())
             .filter((c: string) => codigosValidos.has(c));
 
-          const itemNumero = String(idx + 1);
-          const itemTitulo = typeof it?.titulo === "string" && it.titulo.trim()
-            ? it.titulo.trim()
-            : `Apartado ${itemNumero}`;
+          let itemNumero = typeof it?.numero === "string" && it.numero.trim() ? it.numero.trim() : "";
+          let itemTitulo = typeof it?.titulo === "string" && it.titulo.trim() ? it.titulo.trim() : "";
+
+          // Si no vino número explícito, intentar detectarlo del inicio del título
+          if (!itemNumero && itemTitulo) {
+            const m = itemTitulo.match(/^(?:actividad|ejercicio|pregunta|apartado)?\s*([0-9]+(?:\.[0-9a-zA-Z]+|\.[a-zA-Z]|[a-zA-Z])?|[a-zA-Z]\))(?:\s*[:.\-–)]\s*|\s+)(.*)$/i);
+            if (m && m[1]) {
+              itemNumero = m[1].replace(/[):.\-–]/g, '').trim();
+              if (m[2] && m[2].trim()) itemTitulo = m[2].trim();
+            }
+          }
+
+          if (!itemNumero) {
+            itemNumero = String(idx + 1);
+          }
+          if (!itemTitulo) {
+            itemTitulo = `Apartado ${itemNumero}`;
+          }
 
           const itemPeso = typeof it?.peso === "number" && !isNaN(it.peso) && it.peso > 0
             ? Math.round(it.peso * 100) / 100
@@ -769,18 +1606,32 @@ REGLAS OBLIGATORIAS:
         }
 
         // 3. Eliminar calificaciones por apartado asociadas
-        await supabase
+        const { error: errDelCalifAp } = await supabase
           .from("calificaciones_apartados")
           .delete()
           .eq("grupo_id", grupo.id)
           .in("actividad_id", idsABorrar);
 
+        if (errDelCalifAp) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar calificaciones de apartados: ${errDelCalifAp.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
         // 4. Eliminar calificaciones estándar asociadas
-        await supabase
+        const { error: errDelCalif } = await supabase
           .from("calificaciones")
           .delete()
           .eq("grupo_id", grupo.id)
           .in("actividad_id", idsABorrar);
+
+        if (errDelCalif) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar calificaciones de actividades: ${errDelCalif.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
 
         // 5. Eliminar las actividades
         const { error: delActError } = await supabase
@@ -796,6 +1647,53 @@ REGLAS OBLIGATORIAS:
           );
         }
 
+        // 6. Sincronizar y depurar cuadernos_sync si existe para el docente
+        try {
+          const { data: syncRow, error: syncQueryErr } = await supabase
+            .from("cuadernos_sync")
+            .select("id, data")
+            .eq("profesor_id", profesor.id)
+            .maybeSingle();
+
+          if (!syncQueryErr && syncRow && syncRow.data) {
+            const dataSync = { ...syncRow.data };
+            let syncModificado = false;
+
+            if (dataSync.grupos && dataSync.grupos[grupo.id]) {
+              const gData = dataSync.grupos[grupo.id];
+              if (Array.isArray(gData.actividades)) {
+                const prevCount = gData.actividades.length;
+                gData.actividades = gData.actividades.filter((a: any) => !idsABorrar.includes(a?.id));
+                if (gData.actividades.length !== prevCount) syncModificado = true;
+              }
+              if (Array.isArray(gData.calificaciones)) {
+                const prevCount = gData.calificaciones.length;
+                gData.calificaciones = gData.calificaciones.filter((c: any) => !idsABorrar.includes(c?.actividad_id));
+                if (gData.calificaciones.length !== prevCount) syncModificado = true;
+              }
+              if (Array.isArray(gData.calificacionesApartados)) {
+                const prevCount = gData.calificacionesApartados.length;
+                gData.calificacionesApartados = gData.calificacionesApartados.filter((ca: any) => !idsABorrar.includes(ca?.actividad_id));
+                if (gData.calificacionesApartados.length !== prevCount) syncModificado = true;
+              }
+            }
+            if (Array.isArray(dataSync.actividades)) {
+              const prevCount = dataSync.actividades.length;
+              dataSync.actividades = dataSync.actividades.filter((a: any) => !idsABorrar.includes(a?.id));
+              if (dataSync.actividades.length !== prevCount) syncModificado = true;
+            }
+
+            if (syncModificado) {
+              await supabase
+                .from("cuadernos_sync")
+                .update({ data: dataSync, updated_at: new Date().toISOString() })
+                .eq("id", syncRow.id);
+            }
+          }
+        } catch {
+          // Si cuadernos_sync no existe en el esquema remoto, continuar sin bloquear la respuesta
+        }
+
         return new Response(
           JSON.stringify({
             success: true,
@@ -806,7 +1704,7 @@ REGLAS OBLIGATORIAS:
       }
 
       // =========================================================================
-      // ELIMINACIÓN DE RÚBRICAS EN LOTE
+      // ELIMINACIÓN DE RÚBRICAS EN LOTE (CASCADA DE ACTIVIDADES ASOCIADAS)
       // =========================================================================
       const isEliminarRubricas = body?.tipo === 'eliminar_rubricas';
       if (isEliminarRubricas) {
@@ -858,21 +1756,80 @@ REGLAS OBLIGATORIAS:
           );
         }
 
-        // 3. Desvincular rubrica_id en actividades asociadas (para no romper las actividades)
-        await supabase
+        // 3. Obtener actividades asociadas a estas rúbricas para eliminarlas en cascada
+        const { data: actsAsoc, error: actsAsocErr } = await supabase
           .from("actividades")
-          .update({ rubrica_id: null })
+          .select("id")
           .eq("grupo_id", grupo.id)
           .in("rubrica_id", idsABorrar);
 
-        // 4. Eliminar calificaciones por apartado asociadas
-        await supabase
+        if (actsAsocErr) {
+          return new Response(
+            JSON.stringify({ error: `Error al comprobar actividades vinculadas a las rúbricas: ${actsAsocErr.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const idsActsAsoc: string[] = (actsAsoc || []).map((a: any) => a.id);
+
+        // 4. Eliminar calificaciones por apartado asociadas a las rúbricas
+        const { error: errCalifApRub } = await supabase
           .from("calificaciones_apartados")
           .delete()
           .eq("grupo_id", grupo.id)
           .in("rubrica_id", idsABorrar);
 
-        // 5. Eliminar las rúbricas
+        if (errCalifApRub) {
+          return new Response(
+            JSON.stringify({ error: `Error al eliminar calificaciones de apartados por rúbrica: ${errCalifApRub.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // 5. Si hay actividades asociadas, eliminar también sus calificaciones y apartados
+        if (idsActsAsoc.length > 0) {
+          const { error: errCalifApAct } = await supabase
+            .from("calificaciones_apartados")
+            .delete()
+            .eq("grupo_id", grupo.id)
+            .in("actividad_id", idsActsAsoc);
+
+          if (errCalifApAct) {
+            return new Response(
+              JSON.stringify({ error: `Error al eliminar calificaciones de apartados de actividades vinculadas: ${errCalifApAct.message}` }),
+              { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          const { error: errCalifActs } = await supabase
+            .from("calificaciones")
+            .delete()
+            .eq("grupo_id", grupo.id)
+            .in("actividad_id", idsActsAsoc);
+
+          if (errCalifActs) {
+            return new Response(
+              JSON.stringify({ error: `Error al eliminar calificaciones de actividades vinculadas: ${errCalifActs.message}` }),
+              { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          // Eliminar las actividades asociadas
+          const { error: delActsErr } = await supabase
+            .from("actividades")
+            .delete()
+            .eq("grupo_id", grupo.id)
+            .in("id", idsActsAsoc);
+
+          if (delActsErr) {
+            return new Response(
+              JSON.stringify({ error: `Error al eliminar actividades vinculadas en Supabase: ${delActsErr.message}` }),
+              { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+        }
+
+        // 6. Eliminar las rúbricas
         const { error: delRubError } = await supabase
           .from("rubricas")
           .delete()
@@ -886,10 +1843,70 @@ REGLAS OBLIGATORIAS:
           );
         }
 
+        // 7. Sincronizar y depurar cuadernos_sync si existe para el docente
+        try {
+          const { data: syncRow, error: syncQueryErr } = await supabase
+            .from("cuadernos_sync")
+            .select("id, data")
+            .eq("profesor_id", profesor.id)
+            .maybeSingle();
+
+          if (!syncQueryErr && syncRow && syncRow.data) {
+            const dataSync = { ...syncRow.data };
+            let syncModificado = false;
+
+            if (dataSync.grupos && dataSync.grupos[grupo.id]) {
+              const gData = dataSync.grupos[grupo.id];
+              if (Array.isArray(gData.rubricas)) {
+                const prevCount = gData.rubricas.length;
+                gData.rubricas = gData.rubricas.filter((r: any) => !idsABorrar.includes(r?.id));
+                if (gData.rubricas.length !== prevCount) syncModificado = true;
+              }
+              if (idsActsAsoc.length > 0 && Array.isArray(gData.actividades)) {
+                const prevCount = gData.actividades.length;
+                gData.actividades = gData.actividades.filter((a: any) => !idsActsAsoc.includes(a?.id));
+                if (gData.actividades.length !== prevCount) syncModificado = true;
+              }
+              if (idsActsAsoc.length > 0 && Array.isArray(gData.calificaciones)) {
+                const prevCount = gData.calificaciones.length;
+                gData.calificaciones = gData.calificaciones.filter((c: any) => !idsActsAsoc.includes(c?.actividad_id));
+                if (gData.calificaciones.length !== prevCount) syncModificado = true;
+              }
+              if (Array.isArray(gData.calificacionesApartados)) {
+                const prevCount = gData.calificacionesApartados.length;
+                gData.calificacionesApartados = gData.calificacionesApartados.filter(
+                  (ca: any) => !idsABorrar.includes(ca?.rubrica_id) && !idsActsAsoc.includes(ca?.actividad_id)
+                );
+                if (gData.calificacionesApartados.length !== prevCount) syncModificado = true;
+              }
+            }
+            if (Array.isArray(dataSync.rubricas)) {
+              const prevCount = dataSync.rubricas.length;
+              dataSync.rubricas = dataSync.rubricas.filter((r: any) => !idsABorrar.includes(r?.id));
+              if (dataSync.rubricas.length !== prevCount) syncModificado = true;
+            }
+            if (idsActsAsoc.length > 0 && Array.isArray(dataSync.actividades)) {
+              const prevCount = dataSync.actividades.length;
+              dataSync.actividades = dataSync.actividades.filter((a: any) => !idsActsAsoc.includes(a?.id));
+              if (dataSync.actividades.length !== prevCount) syncModificado = true;
+            }
+
+            if (syncModificado) {
+              await supabase
+                .from("cuadernos_sync")
+                .update({ data: dataSync, updated_at: new Date().toISOString() })
+                .eq("id", syncRow.id);
+            }
+          }
+        } catch {
+          // Continuar si la tabla de respaldo no existe
+        }
+
         return new Response(
           JSON.stringify({
             success: true,
             eliminadas: idsABorrar,
+            actividadesEliminadas: idsActsAsoc,
           }),
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

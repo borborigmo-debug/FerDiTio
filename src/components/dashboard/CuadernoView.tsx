@@ -26,6 +26,7 @@ import {
   limpiarRespaldoCalificaciones,
   DiagnosticoRespaldo,
 } from '../../services/calificacionesService';
+import { compararCriterios } from '../../utils/rubricaUtils';
 
 interface CuadernoViewProps {
   data: CuadernoGrupoData;
@@ -40,10 +41,27 @@ export const CuadernoView: React.FC<CuadernoViewProps> = ({ data, onUpdateCuader
 
   const grupo = data?.grupo;
   const alumnos = Array.isArray(data?.alumnos) ? data.alumnos : [];
-  const criterios = Array.isArray(data?.criterios) ? data.criterios : [];
-  const actividades = Array.isArray(data?.actividades) ? data.actividades : [];
+  const criterios = React.useMemo(() => {
+    const list = Array.isArray(data?.criterios) ? data.criterios : [];
+    return list.slice().sort(compararCriterios);
+  }, [data?.criterios]);
+  const actividades = React.useMemo(() => {
+    const list = Array.isArray(data?.actividades) ? data.actividades : [];
+    return list.slice().sort((a, b) => {
+      const timeA = a.created_at ? new Date(a.created_at).getTime() : (a.fecha ? new Date(a.fecha).getTime() : 0);
+      const timeB = b.created_at ? new Date(b.created_at).getTime() : (b.fecha ? new Date(b.fecha).getTime() : 0);
+      return timeB - timeA;
+    });
+  }, [data?.actividades]);
   const secciones = Array.isArray(data?.secciones) ? data.secciones : [];
-  const rubricas = Array.isArray(data?.rubricas) ? data.rubricas : [];
+  const rubricas = React.useMemo(() => {
+    const list = Array.isArray(data?.rubricas) ? data.rubricas : [];
+    return list.slice().sort((a, b) => {
+      const timeA = (a as any).created_at ? new Date((a as any).created_at).getTime() : ((a as any).fecha ? new Date((a as any).fecha).getTime() : 0);
+      const timeB = (b as any).created_at ? new Date((b as any).created_at).getTime() : ((b as any).fecha ? new Date((b as any).fecha).getTime() : 0);
+      return timeB - timeA;
+    });
+  }, [data?.rubricas]);
 
   // Calificaciones reactivas en tiempo real
   const [calificaciones, setCalificaciones] = useState<Calificacion[]>(

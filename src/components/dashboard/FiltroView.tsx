@@ -16,13 +16,17 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
+import { compararCriterios } from '../../utils/rubricaUtils';
 
 export const FiltroView: React.FC = () => {
   const { cuadernoData, selectedEvaluacion, selectedGrupo } = useCuaderno();
   const [searchTerm, setSearchTerm] = useState('');
   const [tipoElemento, setTipoElemento] = useState<'todos' | 'criterios' | 'actividades'>('todos');
 
-  const criterios = useMemo(() => cuadernoData?.criterios || [], [cuadernoData?.criterios]);
+  const criterios = useMemo(() => {
+    const list = cuadernoData?.criterios || [];
+    return list.slice().sort(compararCriterios);
+  }, [cuadernoData?.criterios]);
   const actividades = useMemo(() => cuadernoData?.actividades || [], [cuadernoData?.actividades]);
 
   // Criterios filtrados

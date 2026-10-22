@@ -5,7 +5,9 @@
 
 import { getCurrentIdToken } from './authService';
 import { CuadernoGrupoData } from '../types';
-import { recuperarRespaldoCalificacionesApartados } from './calificacionesService';
+import { recuperarRespaldoCalificacionesApartados, purgarActividadesDeRespaldoLocal } from './calificacionesService';
+import { getRubricasEliminadasLocal } from './rubricasService';
+import { compararCodigosCriterio } from '../utils/rubricaUtils';
 
 export interface GrupoDocente {
   id: string;
@@ -163,6 +165,42 @@ export async function fetchCuadernoGrupo(
     }
 
     const resultado = data as CuadernoGrupoData;
+
+    // Filtrar rúbricas eliminadas localmente si la función remota todavía no las eliminó
+    // Filtrar rúbricas eliminadas localmente y sus actividades asociadas
+    const rubsEliminadas = getRubricasEliminadasLocal(resultado.grupo.id);
+    if (rubsEliminadas.size > 0 && Array.isArray(resultado.rubricas)) {
+      resultado.rubricas = resultado.rubricas.filter((r) => !rubsEliminadas.has(r.id));
+      if (Array.isArray(resultado.actividades)) {
+        resultado.actividades = resultado.actividades.filter(
+          (a) => !a.rubrica_id || !rubsEliminadas.has(a.rubrica_id)
+        );
+      }
+      if (resultado.estadisticas) {
+        resultado.estadisticas.totalRubricas = resultado.rubricas.length;
+        if (Array.isArray(resultado.actividades)) {
+          resultado.estadisticas.totalActividades = resultado.actividades.length;
+        }
+      }
+    }
+
+    // Filtrar actividades eliminadas localmente si la función remota todavía no las eliminó
+    const actsEliminadas = getActividadesEliminadasLocal(resultado.grupo.id);
+    if (actsEliminadas.size > 0 && Array.isArray(resultado.actividades)) {
+      resultado.actividades = resultado.actividades.filter((a) => !actsEliminadas.has(a.id));
+      if (Array.isArray(resultado.calificaciones)) {
+        resultado.calificaciones = resultado.calificaciones.filter((c) => !actsEliminadas.has(c.actividad_id));
+      }
+      if (Array.isArray(resultado.calificacionesApartados)) {
+        resultado.calificacionesApartados = resultado.calificacionesApartados.filter(
+          (ca) => !ca.actividad_id || !actsEliminadas.has(ca.actividad_id)
+        );
+      }
+      if (resultado.estadisticas) {
+        resultado.estadisticas.totalActividades = resultado.actividades.length;
+      }
+    }
+
     // Si la respuesta remota no incluye calificacionesApartados o está vacía,
     // comprobar si existe un respaldo local en este dispositivo para no perder calificaciones pendientes:
     if (!resultado.calificacionesApartados || resultado.calificacionesApartados.length === 0) {
@@ -172,6 +210,34 @@ export async function fetchCuadernoGrupo(
       } else if (!resultado.calificacionesApartados) {
         resultado.calificacionesApartados = [];
       }
+    }
+
+    // Orden cronológico para catálogo de rúbricas y actividades (empezando por la más reciente)
+    const parseTime = (dateVal: any): number => {
+      if (!dateVal) return 0;
+      const parsed = new Date(dateVal).getTime();
+      return isNaN(parsed) ? 0 : parsed;
+    };
+
+    if (Array.isArray(resultado.rubricas)) {
+      resultado.rubricas.sort((a, b) => {
+        const timeA = parseTime(a.created_at) || parseTime((a as any).fecha);
+        const timeB = parseTime(b.created_at) || parseTime((b as any).fecha);
+        return timeB - timeA;
+      });
+    }
+
+    if (Array.isArray(resultado.actividades)) {
+      resultado.actividades.sort((a, b) => {
+        const timeA = parseTime(a.created_at) || parseTime(a.fecha);
+        const timeB = parseTime(b.created_at) || parseTime(b.fecha);
+        return timeB - timeA;
+      });
+    }
+
+    // Orden de criterios: 10.1 y 10.2 en último lugar
+    if (Array.isArray(resultado.criterios)) {
+      resultado.criterios.sort((a, b) => compararCodigosCriterio(a.codigo, b.codigo));
     }
 
     return resultado;
@@ -194,8 +260,41 @@ export async function fetchCuadernoGrupo(
   }
 }
 
+const STORAGE_KEY_ACTIVIDADES_ELIMINADAS = 'fernanditio_actividades_eliminadas_';
+
+export function getActividadesEliminadasLocal(grupoId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_KEY_ACTIVIDADES_ELIMINADAS}${grupoId}`);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        return new Set(arr.map(String));
+      }
+    }
+  } catch (err) {
+    console.warn('[gruposService] Error al leer actividades eliminadas localmente:', err);
+  }
+  return new Set();
+}
+
+export function registrarActividadesEliminadasLocal(grupoId: string, actividadIds: string[]): void {
+  try {
+    const current = getActividadesEliminadasLocal(grupoId);
+    actividadIds.forEach((id) => current.add(String(id)));
+    localStorage.setItem(
+      `${STORAGE_KEY_ACTIVIDADES_ELIMINADAS}${grupoId}`,
+      JSON.stringify(Array.from(current))
+    );
+  } catch (err) {
+    console.warn('[gruposService] Error al registrar actividades eliminadas localmente:', err);
+  }
+}
+
 /**
  * Elimina en lote actividades de un grupo autorizado en Supabase.
+ * Envía la petición autenticada a la Edge Function 'fernanditio-data'.
+ * Lanza un error descriptivo si el servidor falla o no implementa la operación;
+ * no simula éxito en almacenamiento local ni disfraza errores.
  */
 export async function eliminarActividadesLote(
   grupoId: string,
@@ -211,6 +310,7 @@ export async function eliminarActividadesLote(
   }
 
   const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+
   let response: Response;
   try {
     response = await fetch(endpoint, {
@@ -226,18 +326,41 @@ export async function eliminarActividadesLote(
         actividadIds,
       }),
     });
-  } catch (err: any) {
-    throw new Error(`Error de red al conectar con el servidor: ${err?.message || err}`);
+  } catch (netErr: any) {
+    throw new Error(`Error de conexión al intentar eliminar actividades: ${netErr?.message || netErr}`);
   }
 
-  if (!response.ok) {
+  if (response.ok) {
+    const data = await response.json();
+    if (data?.success) {
+      const eliminadas = data.eliminadas || actividadIds;
+      registrarActividadesEliminadasLocal(grupoId, eliminadas);
+      purgarActividadesDeRespaldoLocal(grupoId, eliminadas);
+      return {
+        success: true,
+        eliminadas,
+      };
+    }
+    throw new Error(data?.error || 'La operación en el servidor no devolvió confirmación de éxito.');
+  } else {
     let detalle = `HTTP ${response.status}: ${response.statusText}`;
     try {
       const errJson = await response.json();
       if (errJson?.error) detalle = errJson.error;
     } catch {}
-    throw new Error(detalle);
-  }
 
-  return await response.json();
+    if (
+      detalle.includes('Se requiere al menos una calificación para guardar o retirar') ||
+      detalle.includes('No se reconoce el tipo') ||
+      response.status === 404 ||
+      response.status === 501
+    ) {
+      throw new Error(
+        `La Edge Function remota de Supabase aún no tiene desplegada la operación 'eliminar_actividades' (${detalle}). El cambio no se ha persistido en el servidor.`
+      );
+    }
+
+    throw new Error(`Error al eliminar actividades en Supabase: ${detalle}`);
+  }
 }
+

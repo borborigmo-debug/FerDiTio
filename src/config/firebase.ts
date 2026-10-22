@@ -27,9 +27,10 @@ export interface FirebaseConfigStatus {
  */
 export function checkFirebaseConfig(): FirebaseConfigStatus {
   const missingKeys: string[] = [];
+  const env = (import.meta as any).env || {};
 
   for (const key of REQUIRED_FIREBASE_ENV_VARS) {
-    const value = import.meta.env[key];
+    const value = env[key];
     if (!value || typeof value !== 'string' || value.trim() === '' || value.includes('tu-proyecto') || value.includes('Example')) {
       missingKeys.push(key);
     }
@@ -48,13 +49,14 @@ const configStatus = checkFirebaseConfig();
 
 if (configStatus.isConfigured) {
   try {
+    const env = (import.meta as any).env || {};
     const firebaseConfig = {
-      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-      appId: import.meta.env.VITE_FIREBASE_APP_ID,
+      apiKey: env.VITE_FIREBASE_API_KEY,
+      authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
+      projectId: env.VITE_FIREBASE_PROJECT_ID,
+      storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
+      messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+      appId: env.VITE_FIREBASE_APP_ID,
     };
 
     firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);

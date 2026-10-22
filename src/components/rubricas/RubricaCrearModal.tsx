@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useId, useRef, useEffect } from 'react';
+import React, { useState, useId, useRef, useEffect, useMemo } from 'react';
 import { Criterio, Rubrica, ActividadDetalle } from '../../types';
 import { EvaluacionPeriodo } from '../../context/CuadernoContext';
 import { crearRubricaYActividad, analizarRubricaConGemini, BorradorRubricaGemini } from '../../services/rubricasService';
 import { optimizeImageForGemini, extractDocxTextAndTables } from '../../utils/geminiRubricaImportUtils';
-import { generateUuid } from '../../utils/rubricaUtils';
+import { generateUuid, compararCriterios, compararCodigosCriterio } from '../../utils/rubricaUtils';
 import {
   X,
   FileCheck,
@@ -32,10 +32,10 @@ import {
 
 export type TipoRubricaCrear = 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
 
-interface ApartadoFormState {
+export interface ApartadoFormState {
   id: string; // UUID v4 garantizado
-  numero: string;
-  titulo: string;
+  numero: string; // Identificador original (ej. "5.a", "5.b", "2", "3.1")
+  titulo: string; // Enunciado de la actividad
   peso: number | null;
   criterios: string[];
   descriptores?: {
@@ -48,16 +48,103 @@ interface ApartadoFormState {
 
 interface RubricaCrearModalProps {
   grupoId: string;
+  grupoNombre?: string;
   tipoInicial: TipoRubricaCrear;
   origenInicial?: 'foto' | 'word' | null;
   periodoInicial?: EvaluacionPeriodo;
   criterios: Criterio[];
   onClose: () => void;
-  onSuccess: (rubrica: Rubrica, actividad: ActividadDetalle) => void;
+  onSuccess: (rubrica: Rubrica, actividad: ActividadDetalle, iniciarEvaluacion?: boolean) => void;
+}
+
+/**
+ * Extrae de forma robusta el número original y el enunciado de un apartado.
+ * Respeta exactamente numeraciones como "5.a", "5.b", "2", "3.1" sin forzar que empiecen por 1.
+ */
+export function extraerNumeroYEnunciado(
+  rawTitulo: string,
+  rawNumero?: string | null,
+  fallbackIndex?: number
+): { numero: string; enunciado: string } {
+  const cleanTitulo = (rawTitulo || '').trim();
+
+  // 1. Si el número explícito ya contiene caracteres alfanuméricos / puntos / guiones ("5.a", "2.1", "5a")
+  if (rawNumero && typeof rawNumero === 'string') {
+    const trimmedNum = rawNumero.trim();
+    if (trimmedNum && !/^\d+$/.test(trimmedNum)) {
+      return { numero: trimmedNum, enunciado: cleanTitulo };
+    }
+  }
+
+  // 2. Extraer del texto del enunciado si comienza con patrones como "5.a.", "5.a)", "Actividad 5.a:", "Pregunta 2.b"
+  const regexConPrefijo = /^(?:actividad|ejercicio|pregunta|apartado|tarea|cuesti[oó]n|item)?\s*([0-9]+(?:\.[0-9a-zA-Z]+|\.[a-zA-Z]|[a-zA-Z])?|[a-zA-Z]\))(?:\s*[:.\-–)]\s*|\s+)(.*)$/i;
+  const match = cleanTitulo.match(regexConPrefijo);
+  if (match) {
+    const numDetectado = match[1].replace(/[):.\-–]/g, '').trim();
+    const restoEnunciado = match[2].trim();
+    if (numDetectado) {
+      return {
+        numero: numDetectado,
+        enunciado: restoEnunciado || cleanTitulo,
+      };
+    }
+  }
+
+  // 3. Patrón puro al inicio: "5.a ", "5.a: ", "12.b. ", "5.1: "
+  const regexPuro = /^([0-9]+[a-zA-Z]|[0-9]+(?:\.[0-9a-zA-Z]+)+|[a-zA-Z]\))(?:\s*[:.\-–]\s*|\s+)(.*)$/i;
+  const matchPuro = cleanTitulo.match(regexPuro);
+  if (matchPuro) {
+    const numDetectado = matchPuro[1].replace(/[):.\-–]/g, '').trim();
+    const restoEnunciado = matchPuro[2].trim();
+    if (numDetectado) {
+      return {
+        numero: numDetectado,
+        enunciado: restoEnunciado || cleanTitulo,
+      };
+    }
+  }
+
+  // 4. Si hay rawNumero disponible válido, usarlo
+  if (rawNumero && String(rawNumero).trim()) {
+    return { numero: String(rawNumero).trim(), enunciado: cleanTitulo };
+  }
+
+  // 5. Fallback a número secuencial
+  const def = fallbackIndex !== undefined ? String(fallbackIndex + 1) : '1';
+  return { numero: def, enunciado: cleanTitulo };
+}
+
+/**
+ * Obtiene la actividad base de una numeración (ej.: "5.a" -> base "5", sub "a"; "2" -> base "2").
+ */
+export function getBaseActivity(numero: string): { base: string; sub?: string } {
+  const clean = String(numero || '').trim();
+  const match = clean.match(/^([0-9]+)(?:[.\-_/]([a-zA-Z0-9]+)|([a-zA-Z]+))$/);
+  if (match) {
+    const base = match[1];
+    const sub = match[2] || match[3];
+    return { base, sub };
+  }
+  const matchLetter = clean.match(/^([a-zA-Z]+)[.\-_/]([0-9]+)$/);
+  if (matchLetter) {
+    return { base: matchLetter[1], sub: matchLetter[2] };
+  }
+  return { base: clean };
+}
+
+export interface GrupoActividadVista {
+  key: string;
+  isGroup: boolean;
+  baseNumero: string;
+  displayNumero: string;
+  criterios: string[];
+  tituloComun: string;
+  items: ApartadoFormState[];
 }
 
 export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   grupoId,
+  grupoNombre = 'Curso actual',
   tipoInicial,
   origenInicial = null,
   periodoInicial = '1.º Ev',
@@ -74,13 +161,18 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [criteriosSeleccionados, setCriteriosSeleccionados] = useState<string[]>([]);
   const [busquedaCriterio, setBusquedaCriterio] = useState('');
 
-  // Apartados iniciales
+  // Apartados / actividades de la rúbrica
   const [apartados, setApartados] = useState<ApartadoFormState[]>([]);
+
+  // Selección múltiple para eliminar actividades dentro del modal
+  const [selectedApartadoIds, setSelectedApartadoIds] = useState<Set<string>>(new Set());
+
+  // Grupos de epígrafes desplegados en pantalla (por defecto colapsados)
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string>>(new Set());
 
   // Estados de interfaz y envío
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [mostrarOpcionesAvanzadas, setMostrarOpcionesAvanzadas] = useState(false);
 
   // Estados de la Asistencia con Gemini (Foto / Word)
   const [isAnalyzingWithGemini, setIsAnalyzingWithGemini] = useState(false);
@@ -88,13 +180,13 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [analisisSuccessMessage, setAnalisisSuccessMessage] = useState<string | null>(null);
   const [analisisError, setAnalisisError] = useState<string | null>(null);
 
-  // Referencias a inputs ocultos de archivos (montados fuera del formulario)
+  // Referencias a inputs ocultos de archivos
   const fileInputFotoRef = useRef<HTMLInputElement>(null);
   const fileInputCamaraRef = useRef<HTMLInputElement>(null);
   const fileInputWordRef = useRef<HTMLInputElement>(null);
   const autoTriggeredRef = useRef(false);
 
-  // Disparo automático seguro si se solicitó origen asistido al abrir (una sola vez)
+  // Disparo automático al abrir si se especificó origen
   useEffect(() => {
     if (autoTriggeredRef.current) return;
     if (origenInicial === 'foto') {
@@ -130,52 +222,78 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     );
   };
 
-  // Generar automáticamente apartados iniciales a partir de los criterios seleccionados
-  const handleGenerarApartadosDesdeCriterios = () => {
-    if (criteriosSeleccionados.length === 0) {
-      setErrorMessage('Selecciona al menos un criterio para generar apartados automáticos.');
-      return;
-    }
-    setErrorMessage(null);
-
-    const pesoSugerido = Math.round((100 / criteriosSeleccionados.length) * 100) / 100;
-    const nuevosApartados: ApartadoFormState[] = criteriosSeleccionados.map((cod, idx) => {
-      const criterioObj = criterios.find((c) => c.codigo === cod);
-      return {
-        id: generateUuid().toLowerCase(),
-        numero: String(idx + 1),
-        titulo: criterioObj ? `Apartado ${idx + 1}: ${criterioObj.descripcion}` : `Apartado ${idx + 1} (${cod})`,
-        peso: pesoSugerido,
-        criterios: [cod],
-      };
-    });
-
-    setApartados(nuevosApartados);
-  };
-
   // Añadir un apartado manual
   const handleAddApartado = () => {
-    const nuevoNumero = String(apartados.length + 1);
+    // Proponer numeración basada en el último o siguiente disponible
+    let sugerido = String(apartados.length + 1);
+    if (apartados.length > 0) {
+      const ultimo = apartados[apartados.length - 1].numero;
+      const matchNum = ultimo.match(/^(\d+)/);
+      if (matchNum) {
+        sugerido = String(parseInt(matchNum[1], 10) + 1);
+      }
+    }
+
     const nuevo: ApartadoFormState = {
       id: generateUuid().toLowerCase(),
-      numero: nuevoNumero,
-      titulo: `Apartado ${nuevoNumero}`,
+      numero: sugerido,
+      titulo: `Actividad ${sugerido}`,
       peso: null,
       criterios: criteriosSeleccionados.length > 0 ? [criteriosSeleccionados[0]] : [],
     };
     setApartados((prev) => [...prev, nuevo]);
   };
 
-  // Eliminar un apartado
+  // Eliminar un apartado individual (CONSERVANDO los números originales de los demás)
   const handleRemoveApartado = (id: string) => {
-    setApartados((prev) =>
-      prev
-        .filter((a) => a.id !== id)
-        .map((a, idx) => ({
-          ...a,
-          numero: String(idx + 1),
-        }))
-    );
+    setApartados((prev) => prev.filter((a) => a.id !== id));
+    setSelectedApartadoIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  // Eliminar múltiples actividades seleccionadas
+  const handleDeleteSelectedApartados = () => {
+    if (selectedApartadoIds.size === 0) return;
+    setApartados((prev) => prev.filter((a) => !selectedApartadoIds.has(a.id)));
+    setSelectedApartadoIds(new Set());
+  };
+
+  // Toggle selección de un apartado
+  const handleToggleSelectApartado = (id: string) => {
+    setSelectedApartadoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Toggle seleccionar todas las actividades
+  const handleToggleSelectAll = () => {
+    if (selectedApartadoIds.size === apartados.length && apartados.length > 0) {
+      setSelectedApartadoIds(new Set());
+    } else {
+      setSelectedApartadoIds(new Set(apartados.map((a) => a.id)));
+    }
+  };
+
+  // Toggle desplegar/colapsar epígrafes de una actividad agrupada
+  const handleToggleExpandGroup = (groupKey: string) => {
+    setExpandedGroupKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
   };
 
   // Actualizar campo de apartado
@@ -183,7 +301,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     setApartados((prev) => prev.map((a) => (a.id === id ? { ...a, ...updates } : a)));
   };
 
-  // Aplicar borrador recibido de Gemini a los estados del formulario para revisión humana
+  // Aplicar borrador recibido de Gemini conservando numeración original
   const aplicarBorradorGemini = (borrador: BorradorRubricaGemini, nombreOrigen: string) => {
     if (!borrador) {
       throw new Error('La respuesta de Gemini no contiene un borrador válido.');
@@ -193,7 +311,6 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       setTitulo(borrador.titulo.trim());
     }
 
-    // Normalizar de forma estricta el tipo de rúbrica a ACTIVIDAD, TRABAJO o EXAMEN
     if (borrador.tipo) {
       const tipoStr = String(borrador.tipo).toUpperCase().trim();
       if (tipoStr.includes('TRABAJO') || tipoStr.includes('PROYECTO')) {
@@ -217,10 +334,17 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
             : [];
           itemCriterios.forEach((c) => codigosAsociados.add(c));
 
+          // Extraer número original del título o campo número (ej. "5.a", "2", "3.b")
+          const { numero: numExtraid, enunciado: enunciadExtraid } = extraerNumeroYEnunciado(
+            it?.titulo || '',
+            it?.numero,
+            idx
+          );
+
           return {
             id: it?.id && typeof it.id === 'string' && it.id.trim() ? it.id : generateUuid().toLowerCase(),
-            numero: it?.numero && typeof it.numero === 'string' ? it.numero : String(idx + 1),
-            titulo: it?.titulo && typeof it.titulo === 'string' && it.titulo.trim() ? it.titulo.trim() : `Apartado ${idx + 1}`,
+            numero: numExtraid,
+            titulo: enunciadExtraid || `Apartado ${numExtraid}`,
             peso: typeof it?.peso === 'number' && !isNaN(it.peso) ? it.peso : null,
             criterios: itemCriterios,
             descriptores: it?.descriptores && typeof it.descriptores === 'object' ? it.descriptores : undefined,
@@ -230,24 +354,25 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
 
     setApartados(apartadosFormateados);
     setCriteriosSeleccionados(Array.from(codigosAsociados));
+    setSelectedApartadoIds(new Set());
+    setExpandedGroupKeys(new Set()); // Colapsados por defecto
 
     const sinCriterio = apartadosFormateados.filter((a) => a.criterios.length === 0).length;
     if (sinCriterio > 0) {
       setAnalisisSuccessMessage(
-        `Rúbrica analizada con éxito desde "${nombreOrigen}". Se generaron ${apartadosFormateados.length} apartados (${sinCriterio} con criterio pendiente de selección manual). Revisa y edita los datos antes de guardar.`
+        `Rúbrica importada con éxito desde "${nombreOrigen}". Se detectaron ${apartadosFormateados.length} apartados (${sinCriterio} con criterio pendiente). Conservada la numeración original.`
       );
     } else {
       setAnalisisSuccessMessage(
-        `Rúbrica analizada con éxito desde "${nombreOrigen}". Se generaron ${apartadosFormateados.length} apartados vinculados con los criterios del grupo. Revisa y edita los datos antes de guardar.`
+        `Rúbrica importada con éxito desde "${nombreOrigen}". Se detectaron ${apartadosFormateados.length} apartados con su numeración original vinculados a los criterios oficiales.`
       );
     }
   };
 
-  // Manejador para fotografía (cámara o selección de archivo)
+  // Manejador para fotografía
   const handleFotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     e.stopPropagation();
     const file = e.target.files?.[0];
-    // Limpiar siempre el valor para permitir volver a seleccionar el mismo archivo
     e.target.value = '';
     if (!file) return;
 
@@ -264,6 +389,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         origen: 'foto',
         imagenBase64: base64,
         mimeType,
+        criterios,
+        grupoNombre,
       });
       aplicarBorradorGemini(borrador, file.name);
     } catch (err: any) {
@@ -279,7 +406,6 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const handleWordSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     e.stopPropagation();
     const file = e.target.files?.[0];
-    // Limpiar siempre el valor para permitir volver a seleccionar el mismo archivo
     e.target.value = '';
     if (!file) return;
 
@@ -295,6 +421,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         grupoId,
         origen: 'word',
         documentoTexto: textoDocx,
+        criterios,
+        grupoNombre,
       });
       aplicarBorradorGemini(borrador, file.name);
     } catch (err: any) {
@@ -306,12 +434,10 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     }
   };
 
-  // Envío del formulario con persistencia confirmada en Supabase
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
+  // Envío del formulario y persistencia
+  const handleSubmit = async (iniciarEvaluacionInmediata = false) => {
     if (!titulo.trim()) {
-      setErrorMessage('Debes indicar un título para la rúbrica y actividad.');
+      setErrorMessage('Debes indicar un título para la actividad.');
       return;
     }
 
@@ -320,10 +446,15 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       return;
     }
 
-    // Validar que si hay apartados, todos tengan título
+    if (apartados.length === 0) {
+      setErrorMessage('La rúbrica debe contener al menos una actividad o apartado.');
+      return;
+    }
+
+    // Validar que si hay apartados, todos tengan título o enunciado
     for (let i = 0; i < apartados.length; i++) {
       if (!apartados[i].titulo.trim()) {
-        setErrorMessage(`El apartado #${apartados[i].numero} debe tener un título descriptivo.`);
+        setErrorMessage(`La actividad #${apartados[i].numero} debe tener un enunciado o título.`);
         return;
       }
     }
@@ -353,7 +484,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         })),
       });
 
-      onSuccess(resultado.rubrica, resultado.actividad);
+      onSuccess(resultado.rubrica, resultado.actividad, iniciarEvaluacionInmediata);
     } catch (err: any) {
       console.error('[RubricaCrearModal] Error al crear rúbrica:', err);
       setErrorMessage(err?.message || 'Error desconocido al persistir la rúbrica en Supabase.');
@@ -361,14 +492,106 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     }
   };
 
-  // Filtrado de criterios disponibles
-  const criteriosFiltrados = criterios.filter((c) => {
-    if (!busquedaCriterio.trim()) return true;
+  // Filtrado de criterios disponibles (con 10.1 y 10.2 en último lugar)
+  const criteriosFiltrados = useMemo(() => {
+    const list = criterios.slice().sort(compararCriterios);
+    if (!busquedaCriterio.trim()) return list;
     const q = busquedaCriterio.toLowerCase();
-    return c.codigo.toLowerCase().includes(q) || c.descripcion.toLowerCase().includes(q);
-  });
+    return list.filter((c) => c.codigo.toLowerCase().includes(q) || c.descripcion.toLowerCase().includes(q));
+  }, [criterios, busquedaCriterio]);
 
-  // Configuración visual según tipo con fallback seguro garantizado
+  /**
+   * Cálculo de actividades agrupadas y epígrafes según criterios:
+   * - Si una actividad tiene varios epígrafes (a,b,c...) y todos evalúan el mismo criterio, se agrupan por defecto colapsados.
+   * - Si un epígrafe evalúa otros criterios, aparece aparte por defecto.
+   */
+  const actividadesAgrupadas = useMemo((): GrupoActividadVista[] => {
+    if (apartados.length === 0) return [];
+
+    // Agrupar preliminarmente por base de numeración (ej: "5" para "5.a", "5.b")
+    const mapBase = new Map<string, ApartadoFormState[]>();
+    for (const ap of apartados) {
+      const { base } = getBaseActivity(ap.numero);
+      const list = mapBase.get(base) || [];
+      list.push(ap);
+      mapBase.set(base, list);
+    }
+
+    const resultado: GrupoActividadVista[] = [];
+    const getCritKey = (c: string[]) => (c || []).slice().sort().join('|');
+
+    for (const [base, items] of mapBase.entries()) {
+      if (items.length <= 1) {
+        // Actividad única sin múltiples epígrafes
+        const it = items[0];
+        resultado.push({
+          key: it.id,
+          isGroup: false,
+          baseNumero: it.numero,
+          displayNumero: it.numero,
+          criterios: it.criterios,
+          tituloComun: it.titulo,
+          items: [it],
+        });
+      } else {
+        // Múltiples apartados con la misma base. Comprobar criterios:
+        // Agrupar por clave de criterios
+        const porCriterio = new Map<string, ApartadoFormState[]>();
+        for (const it of items) {
+          const k = getCritKey(it.criterios);
+          const list = porCriterio.get(k) || [];
+          list.push(it);
+          porCriterio.set(k, list);
+        }
+
+        // Si todos los epígrafes tienen exactamente el mismo criterio:
+        if (porCriterio.size === 1) {
+          const subEpigrafes = items.map((it) => it.numero).join(', ');
+          resultado.push({
+            key: `group_${base}`,
+            isGroup: true,
+            baseNumero: base,
+            displayNumero: `Actividad ${base}`,
+            criterios: items[0].criterios,
+            tituloComun: `${items[0].titulo} (${items.length} epígrafes: ${subEpigrafes})`,
+            items: items,
+          });
+        } else {
+          // Evalúan criterios distintos: los epígrafes con criterios diferentes deben aparecer aparte
+          for (const [critKey, subItems] of porCriterio.entries()) {
+            if (subItems.length > 1) {
+              const subNums = subItems.map((it) => it.numero).join(', ');
+              resultado.push({
+                key: `group_${base}_${critKey}`,
+                isGroup: true,
+                baseNumero: base,
+                displayNumero: `Actividad ${base} (${subNums})`,
+                criterios: subItems[0].criterios,
+                tituloComun: `${subItems[0].titulo} (${subItems.length} epígrafes)`,
+                items: subItems,
+              });
+            } else {
+              // Epígrafe singular con criterio distinto: aparece aparte por defecto
+              const it = subItems[0];
+              resultado.push({
+                key: it.id,
+                isGroup: false,
+                baseNumero: it.numero,
+                displayNumero: it.numero,
+                criterios: it.criterios,
+                tituloComun: it.titulo,
+                items: [it],
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return resultado;
+  }, [apartados]);
+
+  // Configuración de estilo según tipo
   const tipoConfigs: Record<TipoRubricaCrear, {
     label: string;
     icon: React.ComponentType<{ className?: string }>;
@@ -400,7 +623,6 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   };
 
   const tipoConfig = tipoConfigs[tipo] || tipoConfigs.ACTIVIDAD;
-  const IconoTipo = tipoConfig.icon;
 
   return (
     <div
@@ -408,8 +630,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       aria-modal="true"
       className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto"
     >
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-2xl overflow-hidden flex flex-col max-h-[94vh] animate-in fade-in zoom-in-95 duration-150">
-        {/* Inputs ocultos de archivo para fotografía, cámara y documento Word (FUERA del form para evitar submits o recargas accidentales) */}
+      <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-3xl overflow-hidden flex flex-col max-h-[94vh] animate-in fade-in zoom-in-95 duration-150">
+        {/* Inputs ocultos de archivo para fotografía y Word */}
         <input
           ref={fileInputFotoRef}
           type="file"
@@ -433,18 +655,37 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           onChange={handleWordSelect}
         />
 
-        {/* Cabecera del Modal */}
-        <div className={`${tipoConfig.headerBg} text-white px-5 py-4 flex items-center justify-between gap-3 shadow-sm select-none`}>
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-              <IconoTipo className="w-5 h-5 text-white" />
+        {/* ========================================================
+            1. PARTE SUPERIOR: CURSO / EVALUACIÓN
+            ======================================================== */}
+        <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between gap-3 shadow-sm select-none border-b border-slate-800">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 shadow-2xs">
+              <GraduationCap className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-bold leading-tight">
-                Crear Rúbrica de {tipoConfig.label}
-              </h2>
-              <p className="text-[11px] text-white/80">
-                Se registrará en Rúbricas y creará automáticamente la actividad vinculada en el cuaderno.
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300">Curso:</span>
+                <span className="text-sm font-bold text-white truncate max-w-[200px] sm:max-w-xs md:max-w-md">
+                  {grupoNombre}
+                </span>
+                <span className="text-slate-400 font-bold">/</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300">Evaluación:</span>
+                <select
+                  value={evaluacionPeriodo}
+                  onChange={(e) => setEvaluacionPeriodo(e.target.value as EvaluacionPeriodo)}
+                  className="bg-slate-800 text-white font-bold font-mono text-xs px-2 py-0.5 rounded border border-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                  title="Cambiar evaluación para esta actividad"
+                >
+                  {periodosValidos.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                Revisión de rúbrica asistida con Gemini y creación de la actividad vinculada en el cuaderno.
               </p>
             </div>
           </div>
@@ -453,437 +694,544 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
             type="button"
             onClick={onClose}
             disabled={isSubmitting}
-            className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
             aria-label="Cerrar modal"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Contenido con Scroll */}
-        <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-5 text-slate-800 text-xs">
-          {/* ========================================================
-              0. ASISTENTE INTELIGENTE CON GEMINI (FOTO Y WORD)
-              ======================================================== */}
-          <div className="p-3.5 bg-gradient-to-r from-indigo-50/90 via-purple-50/80 to-sky-50/90 border border-indigo-200/90 rounded-xl space-y-2.5 shadow-2xs">
+        {/* ========================================================
+            2. DEBAJO: TÍTULO DE LA ACTIVIDAD, EVALUAR ALUMNOS
+            ======================================================== */}
+        <div className="bg-indigo-50/70 border-b border-indigo-100 px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <label htmlFor="modal-actividad-titulo" className="text-[11px] font-bold text-indigo-950 uppercase tracking-wider block mb-1">
+              Título de la actividad <span className="text-rose-500">*</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="modal-actividad-titulo"
+                type="text"
+                value={titulo}
+                onChange={(e) => setTitulo(e.target.value)}
+                placeholder="Ej.: Examen tema 5, Comentario de texto lírico..."
+                className="flex-1 px-3 py-1.5 text-xs bg-white border border-indigo-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-slate-900 shadow-2xs"
+              />
+              <div className="flex items-center gap-1 shrink-0">
+                {(['ACTIVIDAD', 'TRABAJO', 'EXAMEN'] as TipoRubricaCrear[]).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTipo(t)}
+                    className={`px-2 py-1 rounded text-[10px] font-bold uppercase transition-all cursor-pointer ${
+                      tipo === t
+                        ? 'bg-indigo-700 text-white shadow-2xs'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Botón directo: Evaluar alumnos */}
+          <div className="flex items-center gap-2 shrink-0 sm:self-end">
+            <button
+              type="button"
+              onClick={() => handleSubmit(true)}
+              disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Guardar la rúbrica y abrir inmediatamente la pantalla para calificar alumnos"
+            >
+              <GraduationCap className="w-3.5 h-3.5" />
+              <span>Evaluar alumnos</span>
+            </button>
+          </div>
+        </div>
+
+        {/* ========================================================
+            3. DEBAJO: LA PROPUESTA DE RÚBRICA Y CONTENIDO
+            ======================================================== */}
+        <div className="p-5 overflow-y-auto space-y-4 text-slate-800 text-xs flex-1">
+          {/* Barra rápida de importación asistida con Gemini */}
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-md bg-indigo-600 text-white flex items-center justify-center shadow-2xs">
-                  <Sparkles className="w-3.5 h-3.5" />
-                </div>
-                <span className="font-bold text-indigo-950 text-xs">
-                  Creación Asistida con Gemini
-                </span>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200">
-                  Castilla y León
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+                <span className="font-bold text-slate-800 text-xs">
+                  Importar o actualizar desde Word (.docx) o Foto
                 </span>
               </div>
-              <span className="text-[10px] text-indigo-700 font-medium">
-                {criterios.length} criterios oficiales en este grupo
+              <span className="text-[10px] text-slate-500 font-medium">
+                {criterios.length} criterios oficiales registrados
               </span>
             </div>
 
-            <p className="text-[11px] text-slate-600 leading-snug">
-              Analiza una rúbrica a partir de una <strong>fotografía</strong> o un archivo <strong>Word (.docx)</strong>. Gemini extraerá apartados, pesos y niveles vinculándolos exclusivamente con los criterios oficiales de este grupo.
-            </p>
-
-            {/* Botones de acción asistida */}
-            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  fileInputFotoRef.current?.click();
-                }}
+                onClick={() => fileInputFotoRef.current?.click()}
                 disabled={isAnalyzingWithGemini || isSubmitting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-                title="Seleccionar foto o imagen desde el dispositivo o galería"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
               >
                 <Camera className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Foto / Galería</span>
+                <span>Foto de la rúbrica</span>
               </button>
 
               <button
                 type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  fileInputCamaraRef.current?.click();
-                }}
+                onClick={() => fileInputWordRef.current?.click()}
                 disabled={isAnalyzingWithGemini || isSubmitting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-                title="Tomar foto directamente con la cámara del dispositivo"
-              >
-                <Camera className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Cámara directa</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  fileInputWordRef.current?.click();
-                }}
-                disabled={isAnalyzingWithGemini || isSubmitting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 active:bg-slate-100 border border-indigo-300 text-indigo-900 font-semibold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-                title="Importar archivo Word (.docx) con matriz o tabla de rúbrica"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
               >
                 <FileText className="w-3.5 h-3.5 text-indigo-600" />
                 <span>Documento Word (.docx)</span>
               </button>
             </div>
 
-            {/* Estado de análisis en curso */}
             {isAnalyzingWithGemini && (
-              <div className="p-2.5 bg-indigo-100/90 border border-indigo-300 rounded-lg text-indigo-950 flex items-center gap-2 animate-pulse">
+              <div className="p-2 bg-indigo-100 border border-indigo-300 rounded-lg text-indigo-950 flex items-center gap-2 animate-pulse text-xs">
                 <Loader2 className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
-                <span className="font-medium text-xs">{analisisMessage || 'Analizando rúbrica con Gemini...'}</span>
+                <span>{analisisMessage || 'Analizando rúbrica con Gemini...'}</span>
               </div>
             )}
 
-            {/* Alerta de error en análisis */}
             {analisisError && (
-              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2 animate-in fade-in">
+              <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2 text-xs">
                 <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                <div className="flex-1 text-xs">
-                  <strong className="block font-semibold">Error al procesar con Gemini:</strong>
-                  <span>{analisisError}</span>
-                </div>
+                <span>{analisisError}</span>
               </div>
             )}
 
-            {/* Notificación de éxito en análisis */}
             {analisisSuccessMessage && (
-              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 flex items-start gap-2 animate-in fade-in">
+              <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 flex items-start gap-2 text-xs">
                 <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                <div className="flex-1 text-xs font-medium">{analisisSuccessMessage}</div>
+                <span>{analisisSuccessMessage}</span>
               </div>
             )}
           </div>
 
-          {/* Mensaje de error general si falla */}
           {errorMessage && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 flex items-start gap-2 animate-in fade-in">
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 flex items-start gap-2 text-xs">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-              <div className="flex-1 font-medium">{errorMessage}</div>
+              <span>{errorMessage}</span>
             </div>
           )}
 
-          {/* 1. Selector de Tipo (Actividad, Trabajo, Examen) */}
-          <div className="space-y-1.5">
-            <label className="font-bold text-slate-700 block uppercase tracking-wider text-[11px]">
-              Tipo de Rúbrica
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['ACTIVIDAD', 'TRABAJO', 'EXAMEN'] as TipoRubricaCrear[]).map((t) => {
-                const isSelected = tipo === t;
-                const config = {
-                  ACTIVIDAD: { label: 'Actividad', icon: FileCheck },
-                  TRABAJO: { label: 'Trabajo', icon: FolderGit2 },
-                  EXAMEN: { label: 'Examen', icon: GraduationCap },
-                }[t];
-                const Icon = config.icon;
-
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setTipo(t)}
-                    className={`py-2 px-3 rounded-lg border text-left font-semibold flex items-center gap-2 transition-all cursor-pointer ${
-                      isSelected
-                        ? 'border-indigo-600 bg-indigo-50/80 text-indigo-900 shadow-2xs'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'
-                    }`}
-                  >
-                    <Icon className={`w-4 h-4 ${isSelected ? 'text-indigo-600' : 'text-slate-400'}`} />
-                    <span className="truncate">{config.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 2. Título de la Rúbrica y Actividad */}
-          <div className="space-y-1.5">
-            <label htmlFor="rubrica-titulo-input" className="font-bold text-slate-700 block uppercase tracking-wider text-[11px]">
-              Título de la Rúbrica y de la Actividad <span className="text-rose-500">*</span>
-            </label>
-            <input
-              id="rubrica-titulo-input"
-              type="text"
-              required
-              value={titulo}
-              onChange={(e) => setTitulo(e.target.value)}
-              placeholder="Ej.: Exposición oral del Romanticismo, Comentario de texto..."
-              className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 transition-all font-medium"
-              autoFocus
-            />
-            <p className="text-[10px] text-slate-400">
-              Este nombre identificará unívocamente la rúbrica en el catálogo y la actividad correspondiente en la tabla de evaluación.
-            </p>
-          </div>
-
-          {/* 3. Período de Evaluación */}
-          <div className="space-y-1.5">
-            <label className="font-bold text-slate-700 block uppercase tracking-wider text-[11px]">
-              Período de Evaluación
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {periodosValidos.map((p) => {
-                const isSelected = evaluacionPeriodo === p;
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setEvaluacionPeriodo(p)}
-                    className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-slate-900 border-slate-900 text-white shadow-2xs'
-                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    {p}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 4. Descripción / Instrucciones (opcional) */}
-          <div className="space-y-1.5">
-            <label htmlFor="rubrica-desc-input" className="font-bold text-slate-700 block uppercase tracking-wider text-[11px]">
-              Descripción o Instrucciones Docentes (opcional)
-            </label>
-            <textarea
-              id="rubrica-desc-input"
-              rows={2}
-              value={descripcion}
-              onChange={(e) => setDescripcion(e.target.value)}
-              placeholder="Orientaciones para la calificación, pautas metodológicas o contexto de la tarea..."
-              className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 transition-all"
-            />
-          </div>
-
-          {/* 5. Criterios de Evaluación Asociados */}
-          <div className="space-y-2 pt-2 border-t border-slate-200">
-            <div className="flex items-center justify-between gap-2">
-              <label className="font-bold text-slate-800 uppercase tracking-wider text-[11px]">
-                Criterios de Evaluación a Asociar ({criteriosSeleccionados.length})
-              </label>
-              {criterios.length > 5 && (
-                <input
-                  type="text"
-                  value={busquedaCriterio}
-                  onChange={(e) => setBusquedaCriterio(e.target.value)}
-                  placeholder="Filtrar criterios..."
-                  className="px-2 py-1 text-[11px] bg-slate-50 border border-slate-200 rounded-md w-36 focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-              )}
-            </div>
-
-            {criterios.length === 0 ? (
-              <p className="text-[11px] text-amber-700 italic">
-                No hay criterios registrados en este grupo. Podrás asociar criterios posteriormente editando la rúbrica.
-              </p>
-            ) : (
-              <div className="max-h-36 overflow-y-auto space-y-1 p-2 rounded-lg bg-slate-50 border border-slate-200">
-                {criteriosFiltrados.map((c) => {
-                  const isChecked = criteriosSeleccionados.includes(c.codigo);
-                  return (
-                    <label
-                      key={c.id || c.codigo}
-                      className={`flex items-start gap-2 p-1.5 rounded-md cursor-pointer transition-colors ${
-                        isChecked ? 'bg-indigo-50/80 text-indigo-950 font-medium' : 'hover:bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => handleToggleCriterio(c.codigo)}
-                        className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                      />
-                      <div className="flex-1 leading-snug">
-                        <span className="font-mono font-bold text-[11px] text-indigo-700 mr-1.5">
-                          {c.codigo}
-                        </span>
-                        <span className="text-[11px] line-clamp-1">{c.descripcion}</span>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* 6. Configuración de Apartados Iniciales */}
-          <div className="space-y-3 pt-2 border-t border-slate-200">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px]">
-                  Apartados de la Rúbrica ({apartados.length})
-                </span>
-                <p className="text-[10px] text-slate-400">
-                  Cada apartado recibirá un UUID v4 persistente en <code className="font-mono">public.rubricas.items</code>.
-                </p>
-              </div>
-
+          {/* Sección de la Propuesta de Rúbrica */}
+          <div className="space-y-3">
+            {/* Cabecera de la propuesta y barra de selección múltiple */}
+            <div className="bg-slate-100/90 p-3 rounded-xl border border-slate-200 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                {criteriosSeleccionados.length > 0 && (
+                <Layers className="w-4 h-4 text-indigo-600" />
+                <span className="font-bold text-slate-900 text-xs uppercase tracking-wide">
+                  Propuesta de Rúbrica
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-white border border-slate-200 text-slate-700 font-mono text-[11px] font-bold">
+                  {apartados.length} {apartados.length === 1 ? 'apartado' : 'apartados'}
+                </span>
+              </div>
+
+              {/* Botones de acción y eliminación múltiple */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {apartados.length > 0 && (
+                  <label className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={apartados.length > 0 && selectedApartadoIds.size === apartados.length}
+                      onChange={handleToggleSelectAll}
+                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <span>
+                      {selectedApartadoIds.size === apartados.length
+                        ? 'Deseleccionar todas'
+                        : `Seleccionar todas (${apartados.length})`}
+                    </span>
+                  </label>
+                )}
+
+                {selectedApartadoIds.size > 0 && (
                   <button
                     type="button"
-                    onClick={handleGenerarApartadosDesdeCriterios}
-                    className="px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md flex items-center gap-1 transition-colors cursor-pointer"
-                    title="Crea un apartado por cada criterio seleccionado arriba con su UUID correspondiente"
+                    onClick={handleDeleteSelectedApartados}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-2xs transition-colors cursor-pointer"
+                    title="Eliminar las actividades seleccionadas"
                   >
-                    <Sparkles className="w-3 h-3 text-indigo-600" />
-                    <span>Autogenerar apartados</span>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar seleccionadas ({selectedApartadoIds.size})</span>
                   </button>
                 )}
 
                 <button
                   type="button"
                   onClick={handleAddApartado}
-                  className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
                 >
-                  <Plus className="w-3 h-3 text-slate-600" />
-                  <span>Añadir apartado</span>
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Añadir actividad</span>
                 </button>
               </div>
             </div>
 
+            {/* Lista de actividades/epígrafes de la rúbrica */}
             {apartados.length === 0 ? (
-              <div className="p-4 rounded-xl border border-dashed border-slate-200 bg-slate-50 text-center space-y-1">
-                <p className="text-slate-500 font-medium">Sin apartados iniciales definidos</p>
-                <p className="text-[10px] text-slate-400">
-                  Puedes guardar la rúbrica ahora y configurarla después en la matriz, o pulsar «Autogenerar apartados» para crearlos al instante con los criterios seleccionados.
+              <div className="p-8 rounded-xl border border-dashed border-slate-300 text-center space-y-2 bg-slate-50/50">
+                <FileText className="w-8 h-8 text-slate-300 mx-auto" />
+                <p className="font-semibold text-slate-600 text-xs">Sin actividades en la propuesta de rúbrica</p>
+                <p className="text-[11px] text-slate-400">
+                  Importa una foto o documento Word con Gemini, o añade actividades manualmente con el botón «Añadir actividad».
                 </p>
               </div>
             ) : (
-              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                {apartados.map((ap) => (
-                  <div
-                    key={ap.id}
-                    className={`p-2.5 rounded-lg border shadow-2xs space-y-2 transition-all ${
-                      ap.criterios.length === 0
-                        ? 'border-amber-300 bg-amber-50/40 hover:border-amber-400'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 flex-1">
-                        <span className="font-mono font-bold text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
-                          #{ap.numero}
-                        </span>
-                        <input
-                          type="text"
-                          value={ap.titulo}
-                          onChange={(e) => handleUpdateApartado(ap.id, { titulo: e.target.value })}
-                          placeholder="Título del apartado..."
-                          className="flex-1 px-2 py-1 text-xs border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-medium bg-white"
-                        />
-                      </div>
+              <div className="space-y-2.5">
+                {actividadesAgrupadas.map((grupo) => {
+                  const isExpanded = expandedGroupKeys.has(grupo.key);
+                  const todosSeleccionados = grupo.items.every((it) => selectedApartadoIds.has(it.id));
+                  const algunSeleccionado = grupo.items.some((it) => selectedApartadoIds.has(it.id));
 
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <div className="flex items-center gap-1">
-                          <span className="text-[10px] text-slate-400 font-mono">Peso:</span>
+                  // Si es un grupo colapsable de epígrafes con el mismo criterio
+                  if (grupo.isGroup) {
+                    return (
+                      <div
+                        key={grupo.key}
+                        className="rounded-xl border border-indigo-200 bg-white shadow-2xs overflow-hidden transition-all"
+                      >
+                        {/* Cabecera de la Actividad Agrupada */}
+                        <div className="p-3 bg-slate-50/80 hover:bg-indigo-50/40 transition-colors flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                            {/* Checkbox de selección múltiple para el grupo */}
+                            <input
+                              type="checkbox"
+                              checked={todosSeleccionados}
+                              ref={(el) => {
+                                if (el) el.indeterminate = algunSeleccionado && !todosSeleccionados;
+                              }}
+                              onChange={() => {
+                                setSelectedApartadoIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (todosSeleccionados) {
+                                    grupo.items.forEach((it) => next.delete(it.id));
+                                  } else {
+                                    grupo.items.forEach((it) => next.add(it.id));
+                                  }
+                                  return next;
+                                });
+                              }}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                              title="Seleccionar todos los epígrafes de esta actividad"
+                            />
+
+                            {/* Número de actividad */}
+                            <span className="font-mono font-bold text-xs px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-900 border border-indigo-200 shrink-0">
+                              {grupo.displayNumero}
+                            </span>
+
+                            {/* Título / Enunciado (Pulsable para desplegar/colapsar epígrafes) */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleExpandGroup(grupo.key)}
+                              className="flex items-center gap-2 text-left flex-1 min-w-0 hover:text-indigo-600 transition-colors cursor-pointer group"
+                              title="Pulsar para desplegar u ocultar los epígrafes de esta actividad"
+                            >
+                              <span className="font-semibold text-xs text-slate-800 line-clamp-1 group-hover:text-indigo-700">
+                                {grupo.tituloComun}
+                              </span>
+                              <div className="flex items-center text-[10px] text-indigo-600 font-bold shrink-0">
+                                {isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                )}
+                              </div>
+                            </button>
+                          </div>
+
+                          {/* Criterios asignados y botón de eliminar grupo */}
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {grupo.criterios.length > 0 ? (
+                                grupo.criterios.map((c) => (
+                                  <span
+                                    key={c}
+                                    className="px-1.5 py-0.5 rounded font-mono text-[10px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200"
+                                    title={`Criterio oficial: ${c}`}
+                                  >
+                                    {c}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                                  Sin criterio
+                                </span>
+                              )}
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                grupo.items.forEach((it) => handleRemoveApartado(it.id));
+                              }}
+                              className="p-1 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors cursor-pointer"
+                              title={`Eliminar toda la ${grupo.displayNumero}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Despliegue de los epígrafes individuales al pulsar sobre el título */}
+                        {isExpanded && (
+                          <div className="p-3 bg-white border-t border-indigo-100 space-y-2">
+                            <p className="text-[10px] text-slate-400 font-medium">
+                              Epígrafes de la actividad (evalúan conjuntamente el criterio):
+                            </p>
+                            {grupo.items.map((ap) => (
+                              <div
+                                key={ap.id}
+                                className="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-50 border border-slate-200"
+                              >
+                                <div className="flex items-center gap-2 flex-1 min-w-0">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedApartadoIds.has(ap.id)}
+                                    onChange={() => handleToggleSelectApartado(ap.id)}
+                                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                  />
+                                  <span className="font-mono font-bold text-[11px] px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-800 shrink-0">
+                                    {ap.numero}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={ap.titulo}
+                                    onChange={(e) => handleUpdateApartado(ap.id, { titulo: e.target.value })}
+                                    className="flex-1 px-2 py-1 text-xs border border-slate-200 rounded focus:border-indigo-500 focus:outline-none bg-white font-medium"
+                                    placeholder="Enunciado del epígrafe..."
+                                  />
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-slate-400 font-mono">Peso:</span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      step="any"
+                                      value={ap.peso !== null && ap.peso !== undefined ? ap.peso : ''}
+                                      onChange={(e) => {
+                                        const val = e.target.value === '' ? null : Number(e.target.value);
+                                        handleUpdateApartado(ap.id, { peso: val });
+                                      }}
+                                      placeholder="%"
+                                      className="w-12 px-1 py-0.5 text-xs text-right border border-slate-200 rounded font-mono bg-white"
+                                    />
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveApartado(ap.id)}
+                                    className="p-1 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors cursor-pointer"
+                                    title="Eliminar este epígrafe"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  // Actividad individual o epígrafe con criterio diferente (aparece aparte por defecto)
+                  const ap = grupo.items[0];
+                  const isChecked = selectedApartadoIds.has(ap.id);
+
+                  return (
+                    <div
+                      key={ap.id}
+                      className={`p-3 rounded-xl border shadow-2xs space-y-2 transition-all ${
+                        isChecked
+                          ? 'border-indigo-400 bg-indigo-50/30'
+                          : ap.criterios.length === 0
+                          ? 'border-amber-300 bg-amber-50/30'
+                          : 'border-slate-200 bg-white hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                          {/* Casilla de selección múltiple */}
                           <input
-                            type="number"
-                            min="0"
-                            max="100"
-                            step="any"
-                            value={ap.peso !== null && ap.peso !== undefined ? ap.peso : ''}
-                            onChange={(e) => {
-                              const val = e.target.value === '' ? null : Number(e.target.value);
-                              handleUpdateApartado(ap.id, { peso: val });
-                            }}
-                            placeholder="%"
-                            className="w-14 px-1.5 py-0.5 text-xs text-right border border-slate-200 rounded focus:border-indigo-500 focus:outline-none font-mono bg-white"
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleSelectApartado(ap.id)}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            title="Seleccionar para eliminar"
+                          />
+
+                          {/* Número de actividad (conservado exactamente, ej: 5.a, 2, 3.b) */}
+                          <input
+                            type="text"
+                            value={ap.numero}
+                            onChange={(e) => handleUpdateApartado(ap.id, { numero: e.target.value })}
+                            className="font-mono font-bold text-xs px-2 py-1 rounded bg-slate-100 border border-slate-200 text-slate-800 w-16 text-center focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500 shrink-0"
+                            title="Identificador original de la actividad o epígrafe"
+                          />
+
+                          {/* Comienzo del enunciado / Título */}
+                          <input
+                            type="text"
+                            value={ap.titulo}
+                            onChange={(e) => handleUpdateApartado(ap.id, { titulo: e.target.value })}
+                            placeholder="Comienzo del enunciado de la actividad..."
+                            className="flex-1 px-2.5 py-1 text-xs border border-slate-200 rounded-lg focus:border-indigo-500 focus:outline-none font-medium bg-white"
                           />
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveApartado(ap.id)}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors"
-                          title="Eliminar apartado"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
+                        {/* Peso y eliminación individual */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-slate-400 font-mono">Peso:</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="any"
+                              value={ap.peso !== null && ap.peso !== undefined ? ap.peso : ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? null : Number(e.target.value);
+                                handleUpdateApartado(ap.id, { peso: val });
+                              }}
+                              placeholder="%"
+                              className="w-14 px-1.5 py-0.5 text-xs text-right border border-slate-200 rounded font-mono bg-white"
+                            />
+                          </div>
 
-                    {/* Advertencia si no tiene criterio asignado */}
-                    {ap.criterios.length === 0 && (
-                      <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-100/90 border border-amber-300 text-amber-900 text-[10px] font-medium animate-in fade-in">
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                        <span>Sin criterio asignado. Pulsa sobre el código correspondiente abajo para vincularlo:</span>
-                      </div>
-                    )}
-
-                    {/* Criterios asociados a este apartado específico */}
-                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 pt-1 border-t border-slate-50">
-                      <span className="font-semibold text-slate-600">Criterio(s):</span>
-                      {criterios.map((c) => {
-                        const isAssociated = ap.criterios.includes(c.codigo);
-                        return (
                           <button
-                            key={c.codigo}
                             type="button"
-                            onClick={() => {
-                              const newCriterios = isAssociated
-                                ? ap.criterios.filter((cod) => cod !== c.codigo)
-                                : [...ap.criterios, c.codigo];
-                              handleUpdateApartado(ap.id, { criterios: newCriterios });
-                            }}
-                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold transition-all cursor-pointer ${
-                              isAssociated
-                                ? 'bg-indigo-100 text-indigo-800 border border-indigo-300'
-                                : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                            }`}
+                            onClick={() => handleRemoveApartado(ap.id)}
+                            className="p-1 text-slate-400 hover:text-rose-600 rounded hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Eliminar actividad"
                           >
-                            {c.codigo}
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
-                        );
-                      })}
+                        </div>
+                      </div>
+
+                      {/* Criterios asignados a esta actividad */}
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-100 text-[10px]">
+                        <span className="font-semibold text-slate-500">Criterio(s):</span>
+                        {ap.criterios.length === 0 ? (
+                          <span className="text-amber-700 font-medium bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                            Pendiente de asignar
+                          </span>
+                        ) : null}
+
+                        {/* Badges de criterios asignados con botón para desvincular */}
+                        {ap.criterios.map((c) => (
+                          <span
+                            key={c}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-200"
+                          >
+                            <span>{c}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleUpdateApartado(ap.id, {
+                                  criterios: ap.criterios.filter((cod) => cod !== c),
+                                });
+                              }}
+                              className="text-indigo-400 hover:text-indigo-700 cursor-pointer"
+                              title={`Quitar criterio ${c}`}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+
+                        {/* Botón para asignar otro criterio de los disponibles */}
+                        {criterios.length > 0 && (
+                          <select
+                            value=""
+                            onChange={(e) => {
+                              const cod = e.target.value;
+                              if (cod && !ap.criterios.includes(cod)) {
+                                handleUpdateApartado(ap.id, {
+                                  criterios: [...ap.criterios, cod],
+                                });
+                              }
+                            }}
+                            className="text-[10px] font-semibold bg-white border border-slate-200 rounded px-1.5 py-0.5 text-slate-600 focus:outline-none cursor-pointer"
+                          >
+                            <option value="">+ Asignar criterio...</option>
+                            {criterios
+                              .filter((c) => !ap.criterios.includes(c.codigo))
+                              .slice()
+                              .sort(compararCriterios)
+                              .map((c) => (
+                                <option key={c.codigo} value={c.codigo}>
+                                  {c.codigo}: {c.descripcion ? c.descripcion.substring(0, 35) + '...' : ''}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
+        </div>
 
-          {/* Botones de Acción / Pie */}
-          <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2.5">
+        {/* ========================================================
+            PIE DE ACCIÓN DEL MODAL
+            ======================================================== */}
+        <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3 text-xs">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isSubmitting}
+            className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold transition-colors cursor-pointer"
+          >
+            Cancelar
+          </button>
+
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={onClose}
-              disabled={isSubmitting}
-              className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold text-xs transition-colors cursor-pointer"
-            >
-              Cancelar
-            </button>
-
-            <button
-              type="submit"
-              disabled={isSubmitting || !titulo.trim()}
-              className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold text-xs shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              onClick={() => handleSubmit(false)}
+              disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
+              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
                 <>
-                  <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Persistiendo en Supabase...</span>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Guardando...</span>
                 </>
               ) : (
                 <>
                   <Check className="w-3.5 h-3.5" />
-                  <span>Crear Rúbrica de {tipoConfig.label}</span>
+                  <span>Guardar Rúbrica</span>
                 </>
               )}
             </button>
+
+            <button
+              type="button"
+              onClick={() => handleSubmit(true)}
+              disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-emerald-300 text-white font-bold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+            >
+              <GraduationCap className="w-3.5 h-3.5" />
+              <span>Guardar y Evaluar Alumnos</span>
+            </button>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );

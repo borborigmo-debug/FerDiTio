@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useCuaderno } from '../../context/CuadernoContext';
 import {
   FileText,
@@ -24,7 +24,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion, CalificacionApartado } from '../../types';
-import { normalizeRubrica, NormalizedRubrica } from '../../utils/rubricaUtils';
+import { normalizeRubrica, NormalizedRubrica, compararCodigosCriterio, compararCriterios } from '../../utils/rubricaUtils';
 
 export interface EvidenciaItem {
   actividadId: string;
@@ -74,10 +74,24 @@ export const ActividadesView: React.FC = () => {
 
   // Estado del Toolkit / Tooltip flotante con evidencias
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
+  const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cancelar y limpiar cualquier temporizador pendiente al desmontar el componente
+  useEffect(() => {
+    return () => {
+      if (tooltipTimerRef.current) {
+        clearTimeout(tooltipTimerRef.current);
+        tooltipTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const grupo = cuadernoData?.grupo;
   const alumnos = useMemo(() => cuadernoData?.alumnos || [], [cuadernoData?.alumnos]);
-  const criterios = useMemo(() => cuadernoData?.criterios || [], [cuadernoData?.criterios]);
+  const criterios = useMemo(() => {
+    const list = cuadernoData?.criterios || [];
+    return list.slice().sort(compararCriterios);
+  }, [cuadernoData?.criterios]);
   const actividades = useMemo(() => cuadernoData?.actividades || [], [cuadernoData?.actividades]);
   const secciones = useMemo(() => cuadernoData?.secciones || [], [cuadernoData?.secciones]);
   const rubricas = useMemo(() => cuadernoData?.rubricas || [], [cuadernoData?.rubricas]);
@@ -490,9 +504,9 @@ export const ActividadesView: React.FC = () => {
     return alumnos.filter((a) => a.nombre.toLowerCase().includes(term));
   }, [alumnos, busquedaAlumno]);
 
-  // Actividades filtradas para el Catálogo secundario
+  // Actividades filtradas para el Catálogo secundario (orden cronológico: más reciente primero)
   const actividadesCatalogo = useMemo(() => {
-    return actividades.filter((act) => {
+    const filtradas = actividades.filter((act) => {
       if (filtroSeccion !== 'todas') {
         if (filtroSeccion === 'sin_seccion' && act.seccion_id) return false;
         if (filtroSeccion !== 'sin_seccion' && act.seccion_id !== filtroSeccion) return false;
@@ -502,6 +516,13 @@ export const ActividadesView: React.FC = () => {
         if (pNorm && pNorm !== selectedEvaluacion) return false;
       }
       return true;
+    });
+
+    return filtradas.slice().sort((a, b) => {
+      const timeA = a.created_at ? new Date(a.created_at).getTime() : (a.fecha ? new Date(a.fecha).getTime() : 0);
+      const timeB = b.created_at ? new Date(b.created_at).getTime() : (b.fecha ? new Date(b.fecha).getTime() : 0);
+      if (timeA !== timeB) return timeB - timeA;
+      return 0;
     });
   }, [actividades, filtroSeccion, soloPeriodoActual, selectedEvaluacion]);
 
@@ -551,7 +572,7 @@ export const ActividadesView: React.FC = () => {
     }
   };
 
-  // Manejador del Hover para abrir el Tooltip en la celda
+  // Manejador del Hover para abrir el Tooltip en la celda con retardo de 1000 ms
   const handleCellMouseEnter = (
     e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>,
     alumnoNombre: string,
@@ -561,6 +582,14 @@ export const ActividadesView: React.FC = () => {
     notaMedia: number | null,
     esMediaGlobal?: boolean
   ) => {
+    // Limpiar cualquier temporizador pendiente y cerrar tooltip activo previo
+    if (tooltipTimerRef.current) {
+      clearTimeout(tooltipTimerRef.current);
+      tooltipTimerRef.current = null;
+    }
+    setTooltip(null);
+
+    // Calcular posición inmediatamente para asegurar que el rectángulo es válido
     const rect = e.currentTarget.getBoundingClientRect();
     const tooltipWidth = 320;
     const tooltipEstimatedHeight = 240;
@@ -575,19 +604,27 @@ export const ActividadesView: React.FC = () => {
       y = Math.max(16, rect.top - tooltipEstimatedHeight - 8);
     }
 
-    setTooltip({
-      x,
-      y,
-      alumnoNombre,
-      tituloColumna,
-      subtituloColumna,
-      notaMedia,
-      evidencias,
-      esMediaGlobal,
-    });
+    // Programar la apertura del tooltip tras 1000 ms
+    tooltipTimerRef.current = setTimeout(() => {
+      setTooltip({
+        x,
+        y,
+        alumnoNombre,
+        tituloColumna,
+        subtituloColumna,
+        notaMedia,
+        evidencias,
+        esMediaGlobal,
+      });
+      tooltipTimerRef.current = null;
+    }, 1000);
   };
 
   const handleCellMouseLeave = () => {
+    if (tooltipTimerRef.current) {
+      clearTimeout(tooltipTimerRef.current);
+      tooltipTimerRef.current = null;
+    }
     setTooltip(null);
   };
 
@@ -742,7 +779,7 @@ export const ActividadesView: React.FC = () => {
 
           {/* Caso A: Tabla por Criterios */}
           {modoEvaluacion === 'criterios' && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden">
               {criterios.length === 0 ? (
                 <div className="text-center py-12 px-4">
                   <Target className="w-10 h-10 text-slate-300 mx-auto mb-2" />
@@ -758,32 +795,32 @@ export const ActividadesView: React.FC = () => {
                   <p className="text-xs text-slate-500 mt-1">La tabla public.alumnos no contiene registros.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto max-h-[72vh] relative">
+                <div className="overflow-x-auto max-h-[72vh] relative overscroll-x-contain">
                   <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-30 shadow-2xs">
+                    <thead className="bg-slate-100 text-slate-800 font-bold border-b-2 border-slate-300 sticky top-0 z-30 shadow-xs">
                       <tr>
                         {/* Columna 1: Lista de Alumnos (Fija a la izquierda) */}
                         <th
                           scope="col"
-                          className="py-3 px-3.5 min-w-[210px] max-w-[240px] sticky left-0 z-40 bg-slate-100 border-r border-slate-200 shadow-xs"
+                          className="py-3 px-2.5 sm:px-3.5 min-w-[130px] sm:min-w-[170px] md:min-w-[210px] max-w-[150px] sm:max-w-[200px] md:max-w-[240px] sticky left-0 z-40 bg-slate-200 border-r-2 border-slate-300 shadow-xs"
                         >
                           <div className="flex items-center justify-between">
-                            <span className="uppercase tracking-wider text-[11px] text-slate-800">Alumno</span>
-                            <span className="text-[10px] font-mono text-slate-500 font-normal">
+                            <span className="uppercase tracking-wider text-[11px] text-slate-900 font-extrabold">Alumno</span>
+                            <span className="text-[10px] font-mono text-slate-600 font-semibold hidden sm:inline">
                               {alumnosFiltrados.length} alumnos
                             </span>
                           </div>
                         </th>
 
-                        {/* Columna Extra (Caso A): Nota media de los criterios con selector de período */}
+                        {/* Columna Extra (Caso A): Nota media de los criterios con selector de período (NO STICKY) */}
                         <th
                           scope="col"
-                          className="py-2.5 px-3 min-w-[135px] max-w-[150px] bg-indigo-50/90 text-indigo-950 border-r border-indigo-200 text-center sticky left-[210px] z-30 shadow-xs"
+                          className="py-2 px-2 sm:px-3 min-w-[95px] sm:min-w-[120px] md:min-w-[140px] max-w-[110px] sm:max-w-[135px] md:max-w-[150px] bg-indigo-100/90 text-indigo-950 border-r-2 border-indigo-300 text-center"
                         >
                           <div className="flex flex-col items-center gap-1">
-                            <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-900 uppercase tracking-wide">
-                              <Award className="w-3.5 h-3.5 text-indigo-600" />
-                              <span>Nota Media</span>
+                            <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-950 uppercase tracking-wide">
+                              <Award className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+                              <span className="truncate">Nota Media</span>
                             </div>
                             {/* Selector de período requerido: 1º Ev, 2º Ev, 3º Ev o Global */}
                             <select
@@ -794,7 +831,7 @@ export const ActividadesView: React.FC = () => {
                                   e.target.value as '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global'
                                 )
                               }
-                              className="text-[11px] font-bold bg-white border border-indigo-300 rounded-md px-1.5 py-0.5 text-indigo-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                              className="text-[10px] sm:text-[11px] font-bold bg-white border border-indigo-300 rounded-md px-1 sm:px-1.5 py-0.5 text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-2xs"
                               title="Seleccionar el período para el cálculo de la nota media de los criterios"
                             >
                               <option value="1.º Ev">1.º Ev</option>
@@ -816,15 +853,19 @@ export const ActividadesView: React.FC = () => {
                             <th
                               key={criterio.id}
                               scope="col"
-                              className="py-2.5 px-2.5 min-w-[105px] max-w-[125px] text-center border-r border-slate-200 hover:bg-slate-100 transition-colors"
+                              className="py-2 px-1.5 sm:px-2.5 min-w-[70px] sm:min-w-[85px] md:min-w-[105px] max-w-[85px] sm:max-w-[105px] md:max-w-[125px] text-center border-r border-slate-300 hover:bg-slate-200/70 transition-colors"
                               title={`${criterio.codigo}: ${criterio.descripcion || 'Sin descripción'}`}
                             >
                               <div className="flex flex-col items-center">
-                                <span className="font-mono text-xs font-bold text-slate-900">
+                                <span className="font-mono text-[11px] sm:text-xs font-bold text-slate-900">
                                   {criterio.codigo}
-                                  {tienePond ? ` / ${criterio.ponderacion}%` : ''}
+                                  {tienePond ? (
+                                    <span className="hidden sm:inline">{` / ${criterio.ponderacion}%`}</span>
+                                  ) : (
+                                    ''
+                                  )}
                                 </span>
-                                <span className="text-[10px] text-slate-400 font-normal truncate max-w-[95px]">
+                                <span className="text-[9px] sm:text-[10px] text-slate-500 font-medium truncate max-w-[65px] sm:max-w-[95px]">
                                   {criterio.descripcion || 'Criterio'}
                                 </span>
                               </div>
@@ -834,21 +875,25 @@ export const ActividadesView: React.FC = () => {
                       </tr>
                     </thead>
 
-                    <tbody className="divide-y divide-slate-100 bg-white">
+                    <tbody className="divide-y divide-slate-300 bg-white">
                       {alumnosFiltrados.map((alumno, index) => {
                         const mediaExtra = calcularMediaExtraCriterios(alumno.id, periodoMediaExtra);
 
                         return (
                           <tr
                             key={alumno.id}
-                            className={`hover:bg-slate-50/90 transition-colors ${
-                              index % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'
+                            className={`hover:bg-indigo-50/60 transition-colors ${
+                              index % 2 === 0 ? 'bg-white' : 'bg-slate-50/80'
                             }`}
                           >
                             {/* Alumno (Columna izquierda fija) */}
-                            <td className="py-2.5 px-3.5 sticky left-0 z-20 bg-inherit border-r border-slate-200 font-medium text-slate-900 shadow-xs">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] font-mono text-slate-400 w-5 text-right shrink-0">
+                            <td
+                              className={`py-2.5 px-2.5 sm:px-3.5 sticky left-0 z-20 ${
+                                index % 2 === 0 ? 'bg-white' : 'bg-slate-100'
+                              } border-r-2 border-slate-300 font-semibold text-slate-900 shadow-xs min-w-[130px] sm:min-w-[170px] md:min-w-[210px] max-w-[150px] sm:max-w-[200px] md:max-w-[240px]`}
+                            >
+                              <div className="flex items-center gap-1.5 sm:gap-2">
+                                <span className="text-[10px] font-mono text-slate-400 w-4 sm:w-5 text-right shrink-0">
                                   {alumno.orden || index + 1}
                                 </span>
                                 <span className="truncate text-xs font-semibold text-slate-800" title={alumno.nombre}>
@@ -857,9 +902,9 @@ export const ActividadesView: React.FC = () => {
                               </div>
                             </td>
 
-                            {/* Columna Extra: Nota Media de Criterios */}
+                            {/* Columna Extra: Nota Media de Criterios (NO STICKY) */}
                             <td
-                              className="py-2 px-2.5 text-center sticky left-[210px] z-20 bg-indigo-50/50 border-r border-indigo-100 font-mono text-xs font-bold shadow-xs cursor-help"
+                              className="py-2 px-1.5 sm:px-2.5 text-center bg-indigo-50/70 border-r-2 border-indigo-200 font-mono text-xs font-bold cursor-help"
                               onMouseEnter={(e) => {
                                 const evs = mediaExtra.criteriosConNota.flatMap((item) =>
                                   getEvidenciasCriterio(alumno.id, item.criterio.codigo, periodoMediaExtra)
@@ -905,7 +950,7 @@ export const ActividadesView: React.FC = () => {
                                   {mediaExtra.media.toFixed(2)}
                                 </span>
                               ) : (
-                                <span className="text-slate-300 font-mono text-xs">—</span>
+                                <span className="text-slate-400 font-mono text-xs">—</span>
                               )}
                             </td>
 
@@ -917,7 +962,7 @@ export const ActividadesView: React.FC = () => {
                               return (
                                 <td
                                   key={criterio.id}
-                                  className="py-2 px-2 text-center border-r border-slate-100 font-mono text-xs transition-colors hover:bg-indigo-50/40 cursor-help"
+                                  className="py-2 px-2 text-center border-r border-slate-200 font-mono text-xs transition-colors hover:bg-indigo-50/70 cursor-help"
                                   onMouseEnter={(e) =>
                                     handleCellMouseEnter(
                                       e,
@@ -955,7 +1000,7 @@ export const ActividadesView: React.FC = () => {
                                       {mediaNota.toFixed(2)}
                                     </span>
                                   ) : (
-                                    <span className="text-slate-300 font-mono text-xs">—</span>
+                                    <span className="text-slate-400 font-mono text-xs">—</span>
                                   )}
                                 </td>
                               );
@@ -972,7 +1017,7 @@ export const ActividadesView: React.FC = () => {
 
           {/* Caso B: Tabla con Secciones */}
           {modoEvaluacion === 'secciones' && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden">
               {secciones.length === 0 ? (
                 <div className="text-center py-12 px-4">
                   <FolderTree className="w-10 h-10 text-slate-300 mx-auto mb-2" />
@@ -995,32 +1040,32 @@ export const ActividadesView: React.FC = () => {
                   <p className="text-xs text-slate-500 mt-1">La tabla public.alumnos no contiene registros.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto max-h-[72vh] relative">
+                <div className="overflow-x-auto max-h-[72vh] relative overscroll-x-contain">
                   <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-30 shadow-2xs">
+                    <thead className="bg-slate-100 text-slate-800 font-bold border-b-2 border-slate-300 sticky top-0 z-30 shadow-xs">
                       <tr>
                         {/* Columna izquierda fija: Alumno */}
                         <th
                           scope="col"
-                          className="py-3 px-3.5 min-w-[210px] max-w-[240px] sticky left-0 z-40 bg-slate-100 border-r border-slate-200 shadow-xs"
+                          className="py-3 px-2.5 sm:px-3.5 min-w-[130px] sm:min-w-[170px] md:min-w-[210px] max-w-[150px] sm:max-w-[200px] md:max-w-[240px] sticky left-0 z-40 bg-slate-200 border-r-2 border-slate-300 shadow-xs"
                         >
                           <div className="flex items-center justify-between">
-                            <span className="uppercase tracking-wider text-[11px] text-slate-800">Alumno</span>
-                            <span className="text-[10px] font-mono text-slate-500 font-normal">
+                            <span className="uppercase tracking-wider text-[11px] text-slate-900 font-extrabold">Alumno</span>
+                            <span className="text-[10px] font-mono text-slate-600 font-semibold hidden sm:inline">
                               {alumnosFiltrados.length} alumnos
                             </span>
                           </div>
                         </th>
 
-                        {/* Columna Extra (Caso B): Nota Media Global de Secciones */}
+                        {/* Columna Extra (Caso B): Nota Media Global de Secciones (NO STICKY) */}
                         <th
                           scope="col"
-                          className="py-2.5 px-3 min-w-[135px] max-w-[150px] bg-indigo-50/90 text-indigo-950 border-r border-indigo-200 text-center sticky left-[210px] z-30 shadow-xs"
+                          className="py-2 px-2 sm:px-3 min-w-[95px] sm:min-w-[120px] md:min-w-[140px] max-w-[110px] sm:max-w-[135px] md:max-w-[150px] bg-indigo-100/90 text-indigo-950 border-r-2 border-indigo-300 text-center"
                         >
                           <div className="flex flex-col items-center gap-1">
-                            <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-900 uppercase tracking-wide">
-                              <Award className="w-3.5 h-3.5 text-indigo-600" />
-                              <span>Media Secciones</span>
+                            <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-950 uppercase tracking-wide">
+                              <Award className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+                              <span className="truncate">Media Secciones</span>
                             </div>
                             <select
                               id="selector-periodo-media-secciones"
@@ -1030,7 +1075,7 @@ export const ActividadesView: React.FC = () => {
                                   e.target.value as '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global'
                                 )
                               }
-                              className="text-[11px] font-bold bg-white border border-indigo-300 rounded-md px-1.5 py-0.5 text-indigo-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-2xs"
+                              className="text-[10px] sm:text-[11px] font-bold bg-white border border-indigo-300 rounded-md px-1 sm:px-1.5 py-0.5 text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-2xs"
                               title="Seleccionar el período de evaluación"
                             >
                               <option value="1.º Ev">1.º Ev</option>
@@ -1052,17 +1097,21 @@ export const ActividadesView: React.FC = () => {
                             <th
                               key={sec.id}
                               scope="col"
-                              className="py-2.5 px-3 min-w-[130px] max-w-[160px] text-center border-r border-slate-200 hover:bg-slate-100 transition-colors"
+                              className="py-2.5 px-2 sm:px-3 min-w-[85px] sm:min-w-[110px] md:min-w-[130px] max-w-[110px] sm:max-w-[140px] md:max-w-[160px] text-center border-r border-slate-300 hover:bg-slate-200/70 transition-colors"
                               title={`Sección: ${sec.nombre}`}
                             >
                               <div className="flex flex-col items-center">
-                                <span className="text-xs font-bold text-slate-900">
+                                <span className="text-[11px] sm:text-xs font-bold text-slate-900 truncate max-w-[80px] sm:max-w-[125px]">
                                   {sec.nombre}
-                                  {tienePond ? ` / ${sec.ponderacion}%` : ''}
+                                  {tienePond ? (
+                                    <span className="hidden sm:inline">{` / ${sec.ponderacion}%`}</span>
+                                  ) : (
+                                    ''
+                                  )}
                                 </span>
                                 {sec.color && (
                                   <span
-                                    className="w-8 h-1 rounded-full mt-1"
+                                    className="w-6 sm:w-8 h-1 rounded-full mt-1"
                                     style={{ backgroundColor: sec.color }}
                                   />
                                 )}
@@ -1073,21 +1122,25 @@ export const ActividadesView: React.FC = () => {
                       </tr>
                     </thead>
 
-                    <tbody className="divide-y divide-slate-100 bg-white">
+                    <tbody className="divide-y divide-slate-300 bg-white">
                       {alumnosFiltrados.map((alumno, index) => {
                         const mediaSecExtra = calcularMediaExtraSecciones(alumno.id, periodoMediaExtra);
 
                         return (
                           <tr
                             key={alumno.id}
-                            className={`hover:bg-slate-50/90 transition-colors ${
-                              index % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'
+                            className={`hover:bg-indigo-50/60 transition-colors ${
+                              index % 2 === 0 ? 'bg-white' : 'bg-slate-50/80'
                             }`}
                           >
                             {/* Alumno (Columna izquierda fija) */}
-                            <td className="py-2.5 px-3.5 sticky left-0 z-20 bg-inherit border-r border-slate-200 font-medium text-slate-900 shadow-xs">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] font-mono text-slate-400 w-5 text-right shrink-0">
+                            <td
+                              className={`py-2.5 px-2.5 sm:px-3.5 sticky left-0 z-20 ${
+                                index % 2 === 0 ? 'bg-white' : 'bg-slate-100'
+                              } border-r-2 border-slate-300 font-semibold text-slate-900 shadow-xs min-w-[130px] sm:min-w-[170px] md:min-w-[210px] max-w-[150px] sm:max-w-[200px] md:max-w-[240px]`}
+                            >
+                              <div className="flex items-center gap-1.5 sm:gap-2">
+                                <span className="text-[10px] font-mono text-slate-400 w-4 sm:w-5 text-right shrink-0">
                                   {alumno.orden || index + 1}
                                 </span>
                                 <span className="truncate text-xs font-semibold text-slate-800" title={alumno.nombre}>
@@ -1096,9 +1149,9 @@ export const ActividadesView: React.FC = () => {
                               </div>
                             </td>
 
-                            {/* Columna Extra: Media Secciones */}
+                            {/* Columna Extra: Media Secciones (NO STICKY) */}
                             <td
-                              className="py-2 px-2.5 text-center sticky left-[210px] z-20 bg-indigo-50/50 border-r border-indigo-100 font-mono text-xs font-bold shadow-xs cursor-help"
+                              className="py-2 px-1.5 sm:px-2.5 text-center bg-indigo-50/70 border-r-2 border-indigo-200 font-mono text-xs font-bold cursor-help"
                               onMouseEnter={(e) => {
                                 const evs = mediaSecExtra.seccionesConNota.flatMap((item) =>
                                   getEvidenciasSeccion(alumno.id, item.seccion.id, periodoMediaExtra)
@@ -1144,7 +1197,7 @@ export const ActividadesView: React.FC = () => {
                                   {mediaSecExtra.media.toFixed(2)}
                                 </span>
                               ) : (
-                                <span className="text-slate-300 font-mono text-xs">—</span>
+                                <span className="text-slate-400 font-mono text-xs">—</span>
                               )}
                             </td>
 
@@ -1156,7 +1209,7 @@ export const ActividadesView: React.FC = () => {
                               return (
                                 <td
                                   key={sec.id}
-                                  className="py-2 px-3 text-center border-r border-slate-100 font-mono text-xs transition-colors hover:bg-indigo-50/40 cursor-help"
+                                  className="py-2 px-3 text-center border-r border-slate-200 font-mono text-xs transition-colors hover:bg-indigo-50/70 cursor-help"
                                   onMouseEnter={(e) =>
                                     handleCellMouseEnter(
                                       e,
@@ -1194,7 +1247,7 @@ export const ActividadesView: React.FC = () => {
                                       {mediaNota.toFixed(2)}
                                     </span>
                                   ) : (
-                                    <span className="text-slate-300 font-mono text-xs">—</span>
+                                    <span className="text-slate-400 font-mono text-xs">—</span>
                                   )}
                                 </td>
                               );
@@ -1428,7 +1481,7 @@ export const ActividadesView: React.FC = () => {
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-slate-500">Criterios:</span>
                             <div className="flex flex-wrap gap-1">
-                              {act.criteriosCodigos.map((cod) => (
+                              {act.criteriosCodigos.slice().sort(compararCodigosCriterio).map((cod) => (
                                 <span
                                   key={cod}
                                   className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 font-mono text-[11px] font-semibold border border-indigo-200"
