@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { BookOpen, AlertCircle, ShieldCheck, CheckCircle2, KeyRound } from 'lucide-react';
+import { FernanditioLogo } from '../common/FernanditioLogo';
 
 export const LoginView: React.FC = () => {
   const { status, error, missingConfigKeys, loginWithGoogle, clearError } = useAuth();
@@ -25,18 +26,15 @@ export const LoginView: React.FC = () => {
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 sm:p-6 bg-slate-50">
       <div className="w-full max-w-md bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        {/* Cabecera visual sobria */}
-        <div className="p-6 sm:p-8 text-center border-b border-slate-100 bg-gradient-to-b from-indigo-50/50 to-transparent">
-          <div className="w-14 h-14 mx-auto rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm mb-4">
-            <BookOpen className="w-7 h-7" aria-hidden="true" />
+        {/* Cabecera visual con el logo discreto de Fernanditio */}
+        <div className="p-6 sm:p-8 text-center border-b border-slate-100 bg-gradient-to-b from-indigo-50/40 to-transparent">
+          <div className="flex justify-center mb-4">
+            <FernanditioLogo variant="badge" size="lg" className="drop-shadow-xs" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-            Fernanditio
-          </h1>
-          <p className="mt-1 text-sm font-medium text-indigo-700">
+          <p className="text-sm font-semibold text-slate-800">
             Lengua Castellana y Literatura
           </p>
-          <p className="mt-2 text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
+          <p className="mt-1.5 text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
             Cuaderno de evaluación docente basado en criterios y evidencias para ESO y Bachillerato (Castilla y León).
           </p>
         </div>

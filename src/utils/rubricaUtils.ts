@@ -3,51 +3,68 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Rubrica, RubricaItem, Criterio } from '../types';
+import { Rubrica, RubricaItem, Criterio, Seccion } from '../types';
 
 /**
  * Comparador canónico para códigos de criterios (ej: "1.1", "1.2", ..., "9.2", "10.1", "10.2").
- * Regla normativa: El 10.1 y el 10.2 deben aparecer en último lugar.
+ * Regla normativa: El 10.1 y el 10.2 deben aparecer en último lugar (estrictamente después del 9 y 9.x).
  */
 export function compararCodigosCriterio(a: string, b: string): number {
+  return compararTextoNatural(a, b);
+}
+
+/**
+ * Comparador para objetos Criterio basado en su código oficial,
+ * garantizando que el 10.1 y el 10.2 aparezcan después del 9 (9.1, 9.4...).
+ */
+export function compararCriterios(a: Criterio, b: Criterio): number {
+  return compararCodigosCriterio(a?.codigo || '', b?.codigo || '');
+}
+
+/**
+ * Comparador natural para textos, nombres de secciones y códigos.
+ * Garantiza estrictamente que secciones o apartados como "10.1" o "10" aparezcan
+ * después de "9", "9.1", "9.4", evitando el error del orden lexicográfico ASCII.
+ */
+export function compararTextoNatural(a: string, b: string): number {
   const normA = (a || '').trim();
   const normB = (b || '').trim();
 
   if (normA === normB) return 0;
 
-  // Si uno de los dos es 10.1 o 10.2 (o empieza por 10.) y el otro no, 10.x va al final
-  const isDiezA = /^10(?:\.[0-9a-zA-Z]+)?$/i.test(normA) || normA === '10.1' || normA === '10.2';
-  const isDiezB = /^10(?:\.[0-9a-zA-Z]+)?$/i.test(normB) || normB === '10.1' || normB === '10.2';
+  // Descomponer si empieza por números como "10", "10.1", "9", "9.4", "Sección 10", "Sección 9"
+  const regexNum = /^(\D*?)(\d+)(?:\.(\d+))?(.*)$/i;
+  const matchA = normA.match(regexNum);
+  const matchB = normB.match(regexNum);
 
-  if (isDiezA && !isDiezB) return 1; // A va al final
-  if (!isDiezA && isDiezB) return -1; // B va al final
+  if (matchA && matchB && matchA[1].trim().toLowerCase() === matchB[1].trim().toLowerCase()) {
+    const numA = parseInt(matchA[2], 10);
+    const numB = parseInt(matchB[2], 10);
 
-  // Si ambos son 10.x o ninguno es 10.x, descomponer numéricamente
-  const matchA = normA.match(/^(\d+)(?:\.(\d+))?(.*)$/);
-  const matchB = normB.match(/^(\d+)(?:\.(\d+))?(.*)$/);
+    if (numA !== numB) {
+      return numA - numB; // 9 < 10 -> el 9 va antes del 10
+    }
 
-  if (matchA && matchB) {
-    const majorA = parseInt(matchA[1], 10);
-    const majorB = parseInt(matchB[1], 10);
-    if (majorA !== majorB) return majorA - majorB;
+    const subA = matchA[3] !== undefined ? parseInt(matchA[3], 10) : 0;
+    const subB = matchB[3] !== undefined ? parseInt(matchB[3], 10) : 0;
 
-    const minorA = matchA[2] !== undefined ? parseInt(matchA[2], 10) : 0;
-    const minorB = matchB[2] !== undefined ? parseInt(matchB[2], 10) : 0;
-    if (minorA !== minorB) return minorA - minorB;
+    if (subA !== subB) {
+      return subA - subB; // 10.1 va antes de 10.2
+    }
 
-    return (matchA[3] || '').localeCompare(matchB[3] || '');
+    return (matchA[4] || '').localeCompare(matchB[4] || '', 'es', { numeric: true, sensitivity: 'base' });
   }
 
-  // Fallback con orden natural alfanumérico
-  return normA.localeCompare(normB, undefined, { numeric: true, sensitivity: 'base' });
+  // Orden natural con numeric: true en español (garantiza que "9" preceda a "10")
+  return normA.localeCompare(normB, 'es', { numeric: true, sensitivity: 'base' });
 }
 
 /**
- * Comparador para objetos Criterio basado en su código oficial,
- * garantizando que el 10.1 y el 10.2 aparezcan en último lugar.
+ * Comparador para Secciones y Subsecciones basado en orden natural.
+ * Garantiza que las secciones que empiezan por 10 (10.1, 10.2...) aparezcan después del 9 (9.1, 9.4...).
  */
-export function compararCriterios(a: Criterio, b: Criterio): number {
-  return compararCodigosCriterio(a?.codigo || '', b?.codigo || '');
+export function compararSecciones(a: Seccion, b: Seccion): number {
+  return compararTextoNatural(a?.nombre || '', b?.nombre || '');
 }
 
 export interface NormalizedRubricaItem {

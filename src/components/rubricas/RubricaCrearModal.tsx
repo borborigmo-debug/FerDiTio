@@ -5,10 +5,17 @@
 
 import React, { useState, useId, useRef, useEffect, useMemo } from 'react';
 import { Criterio, Rubrica, ActividadDetalle } from '../../types';
-import { EvaluacionPeriodo } from '../../context/CuadernoContext';
+import { EvaluacionPeriodo, useCuaderno } from '../../context/CuadernoContext';
+import { useAuth } from '../../context/AuthContext';
 import { crearRubricaYActividad, analizarRubricaConGemini, BorradorRubricaGemini } from '../../services/rubricasService';
 import { optimizeImageForGemini, extractDocxTextAndTables } from '../../utils/geminiRubricaImportUtils';
 import { generateUuid, compararCriterios, compararCodigosCriterio } from '../../utils/rubricaUtils';
+import { organizarArbolSecciones } from '../../services/seccionesJerarquiaService';
+import { getCursoColorTheme } from '../../utils/cursoColorUtils';
+import {
+  obtenerGruposVinculadosCon,
+  replicarRubricaEnGrupos,
+} from '../../services/vinculacionRubricasService';
 import {
   X,
   FileCheck,
@@ -28,9 +35,11 @@ import {
   Upload,
   Loader2,
   HelpCircle,
+  Link2,
 } from 'lucide-react';
 
 export type TipoRubricaCrear = 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
+export type OrigenRubricaCrear = 'foto' | 'galeria' | 'ia' | 'manual' | null;
 
 export interface ApartadoFormState {
   id: string; // UUID v4 garantizado
@@ -50,7 +59,8 @@ interface RubricaCrearModalProps {
   grupoId: string;
   grupoNombre?: string;
   tipoInicial: TipoRubricaCrear;
-  origenInicial?: 'foto' | 'word' | null;
+  origenInicial?: OrigenRubricaCrear;
+  archivoInicial?: File | null;
   periodoInicial?: EvaluacionPeriodo;
   criterios: Criterio[];
   onClose: () => void;
@@ -147,15 +157,44 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   grupoNombre = 'Curso actual',
   tipoInicial,
   origenInicial = null,
+  archivoInicial = null,
   periodoInicial = '1.º Ev',
   criterios,
   onClose,
   onSuccess,
 }) => {
+  const { cuadernoData, grupos } = useCuaderno();
+  const { user } = useAuth();
+  const cursoTheme = useMemo(() => getCursoColorTheme(grupoId, grupoNombre), [grupoId, grupoNombre]);
+  const arbolSecciones = useMemo(
+    () => organizarArbolSecciones(cuadernoData?.secciones || [], grupoId),
+    [cuadernoData?.secciones, grupoId]
+  );
+
+  // Cursos vinculados para replicación de rúbricas
+  const gruposVinculadosIds = useMemo(
+    () => obtenerGruposVinculadosCon(grupoId, user?.uid),
+    [grupoId, user?.uid]
+  );
+  const gruposVinculados = useMemo(
+    () => (grupos || []).filter((g) => gruposVinculadosIds.includes(g.id)),
+    [grupos, gruposVinculadosIds]
+  );
+  const [replicarEnVinculados, setReplicarEnVinculados] = useState<boolean>(true);
+  const [gruposSeleccionadosParaReplicar, setGruposSeleccionadosParaReplicar] = useState<string[]>([]);
+
+  useEffect(() => {
+    setGruposSeleccionadosParaReplicar(gruposVinculadosIds);
+  }, [gruposVinculadosIds]);
+
   const [tipo, setTipo] = useState<TipoRubricaCrear>(tipoInicial);
   const [titulo, setTitulo] = useState('');
   const [descripcion, setDescripcion] = useState('');
   const [evaluacionPeriodo, setEvaluacionPeriodo] = useState<EvaluacionPeriodo>(periodoInicial);
+
+  // Evaluar por secciones y subsecciones
+  const [evaluarPorSecciones, setEvaluarPorSecciones] = useState(false);
+  const [seccionSeleccionadaId, setSeccionSeleccionadaId] = useState<string>('');
 
   // Criterios seleccionados para la rúbrica / actividad
   const [criteriosSeleccionados, setCriteriosSeleccionados] = useState<string[]>([]);
@@ -180,37 +219,17 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [analisisSuccessMessage, setAnalisisSuccessMessage] = useState<string | null>(null);
   const [analisisError, setAnalisisError] = useState<string | null>(null);
 
+  // Estado para la opción 3: Rúbrica IA
+  const [promptIaTexto, setPromptIaTexto] = useState('');
+  const [mostrarSeccionIa, setMostrarSeccionIa] = useState<boolean>(origenInicial === 'ia');
+
   // Referencias a inputs ocultos de archivos
   const fileInputFotoRef = useRef<HTMLInputElement>(null);
   const fileInputCamaraRef = useRef<HTMLInputElement>(null);
+  const fileInputGaleriaRef = useRef<HTMLInputElement>(null);
   const fileInputWordRef = useRef<HTMLInputElement>(null);
-  const autoTriggeredRef = useRef(false);
-
-  // Disparo automático al abrir si se especificó origen
-  useEffect(() => {
-    if (autoTriggeredRef.current) return;
-    if (origenInicial === 'foto') {
-      autoTriggeredRef.current = true;
-      const timer = setTimeout(() => {
-        try {
-          fileInputFotoRef.current?.click();
-        } catch (e) {
-          console.warn('[RubricaCrearModal] No se pudo invocar automáticamente el selector de imagen:', e);
-        }
-      }, 150);
-      return () => clearTimeout(timer);
-    } else if (origenInicial === 'word') {
-      autoTriggeredRef.current = true;
-      const timer = setTimeout(() => {
-        try {
-          fileInputWordRef.current?.click();
-        } catch (e) {
-          console.warn('[RubricaCrearModal] No se pudo invocar automáticamente el selector de Word:', e);
-        }
-      }, 150);
-      return () => clearTimeout(timer);
-    }
-  }, [origenInicial]);
+  // Estado para controlar si ya se procesó el archivo inicial
+  const archivoProcesadoRef = useRef(false);
 
   // Períodos válidos admitidos por el modelo y la base de datos
   const periodosValidos: EvaluacionPeriodo[] = ['1.º Ev', '2.º Ev', '3.º Ev', 'Global'];
@@ -369,13 +388,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     }
   };
 
-  // Manejador para fotografía
-  const handleFotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    e.stopPropagation();
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
+  // Procesa una fotografía tomada con la cámara o seleccionada
+  const procesarArchivoFoto = async (file: File) => {
     setIsAnalyzingWithGemini(true);
     setAnalisisError(null);
     setAnalisisSuccessMessage(null);
@@ -402,7 +416,122 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     }
   };
 
-  // Manejador para documento Word (.docx)
+  // Procesa un archivo seleccionado de galería (imagen, pdf, word, etc.)
+  const procesarArchivoGaleria = async (file: File) => {
+    setIsAnalyzingWithGemini(true);
+    setAnalisisError(null);
+    setAnalisisSuccessMessage(null);
+    setAnalisisMessage(`Procesando archivo "${file.name}" de la galería...`);
+
+    try {
+      const fileNameLower = file.name.toLowerCase();
+      const isPdf = file.type === 'application/pdf' || fileNameLower.endsWith('.pdf');
+      const isWord =
+        fileNameLower.endsWith('.docx') ||
+        fileNameLower.endsWith('.doc') ||
+        file.type.includes('word') ||
+        file.type.includes('officedocument');
+      const isImage = file.type.startsWith('image/');
+
+      if (isImage) {
+        setAnalisisMessage(`Optimizando imagen "${file.name}" y analizando con Gemini...`);
+        const { base64, mimeType } = await optimizeImageForGemini(file);
+        setAnalisisMessage('Gemini está estructurando la rúbrica y contrastando contra los criterios oficiales del grupo...');
+        const borrador = await analizarRubricaConGemini({
+          grupoId,
+          origen: 'galeria',
+          imagenBase64: base64,
+          mimeType,
+          criterios,
+          grupoNombre,
+        });
+        aplicarBorradorGemini(borrador, file.name);
+      } else if (isPdf) {
+        setAnalisisMessage(`Cargando documento PDF "${file.name}"...`);
+        const pdfBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const res = (reader.result as string) || '';
+            resolve(res.includes(',') ? res.split(',')[1] : res);
+          };
+          reader.onerror = () => reject(new Error('No se pudo leer el archivo PDF seleccionado.'));
+          reader.readAsDataURL(file);
+        });
+        setAnalisisMessage('Gemini está procesando el documento PDF y vinculando con los criterios oficiales del grupo...');
+        const borrador = await analizarRubricaConGemini({
+          grupoId,
+          origen: 'galeria',
+          pdfBase64,
+          mimeType: 'application/pdf',
+          criterios,
+          grupoNombre,
+        });
+        aplicarBorradorGemini(borrador, file.name);
+      } else if (isWord) {
+        setAnalisisMessage(`Extrayendo texto y tablas del documento Word "${file.name}"...`);
+        const textoDocx = await extractDocxTextAndTables(file);
+        setAnalisisMessage('Gemini está analizando la matriz de Word y contrastando contra los criterios oficiales del grupo...');
+        const borrador = await analizarRubricaConGemini({
+          grupoId,
+          origen: 'galeria',
+          documentoTexto: textoDocx,
+          criterios,
+          grupoNombre,
+        });
+        aplicarBorradorGemini(borrador, file.name);
+      } else {
+        setAnalisisMessage(`Leyendo archivo de texto "${file.name}"...`);
+        const texto = await file.text();
+        setAnalisisMessage('Gemini está estructurando la rúbrica y contrastando con los criterios oficiales...');
+        const borrador = await analizarRubricaConGemini({
+          grupoId,
+          origen: 'galeria',
+          documentoTexto: texto,
+          criterios,
+          grupoNombre,
+        });
+        aplicarBorradorGemini(borrador, file.name);
+      }
+    } catch (err: any) {
+      console.error('[RubricaCrearModal] Error en análisis de archivo de galería con Gemini:', err);
+      setAnalisisError(err?.message || 'Error al analizar el archivo de la galería con Gemini.');
+    } finally {
+      setIsAnalyzingWithGemini(false);
+      setAnalisisMessage(null);
+    }
+  };
+
+  // Procesamiento automático del archivo inicial recibido
+  useEffect(() => {
+    if (archivoInicial && !archivoProcesadoRef.current) {
+      archivoProcesadoRef.current = true;
+      if (origenInicial === 'foto') {
+        procesarArchivoFoto(archivoInicial);
+      } else if (origenInicial === 'galeria') {
+        procesarArchivoGaleria(archivoInicial);
+      }
+    }
+  }, [archivoInicial, origenInicial]);
+
+  // Manejador para fotografía (Cámara / Imagen)
+  const handleFotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await procesarArchivoFoto(file);
+  };
+
+  // Manejador para galería (explorador de archivos: imagen, pdf, word)
+  const handleGaleriaSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await procesarArchivoGaleria(file);
+  };
+
+  // Manejador para documento Word (.docx) directo
   const handleWordSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     e.stopPropagation();
     const file = e.target.files?.[0];
@@ -434,15 +563,46 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     }
   };
 
-  // Envío del formulario y persistencia
+  // Manejador para opción 3: Rúbrica IA (planteamiento al modelo Gemini)
+  const handleGenerarConGeminiIa = async () => {
+    if (!promptIaTexto.trim()) {
+      setAnalisisError('Por favor, describe en el cuadro de texto lo que deseas que contenga la rúbrica (tema, ejercicios, apartados o criterios).');
+      return;
+    }
+
+    setIsAnalyzingWithGemini(true);
+    setAnalisisError(null);
+    setAnalisisSuccessMessage(null);
+    setAnalisisMessage('Gemini está diseñando la rúbrica y alineándola con los criterios oficiales del grupo...');
+
+    try {
+      const borrador = await analizarRubricaConGemini({
+        grupoId,
+        origen: 'ia',
+        promptTexto: promptIaTexto.trim(),
+        criterios,
+        grupoNombre,
+      });
+      aplicarBorradorGemini(borrador, 'Rúbrica IA');
+      setMostrarSeccionIa(false); // Colapsar sección tras generar con éxito
+    } catch (err: any) {
+      console.error('[RubricaCrearModal] Error al generar rúbrica con Gemini IA:', err);
+      setAnalisisError(err?.message || 'Error al solicitar a Gemini la generación de la rúbrica.');
+    } finally {
+      setIsAnalyzingWithGemini(false);
+      setAnalisisMessage(null);
+    }
+  };
+
+  // Envío del formulario y persistencia (Validación obligatoria de título de rúbrica)
   const handleSubmit = async (iniciarEvaluacionInmediata = false) => {
     if (!titulo.trim()) {
-      setErrorMessage('Debes indicar un título para la actividad.');
+      setErrorMessage('Es obligatorio escribir el título de la rúbrica antes de guardarla.');
       return;
     }
 
     if (titulo.trim().length < 2) {
-      setErrorMessage('El título debe tener al menos 2 caracteres.');
+      setErrorMessage('El título de la rúbrica debe tener al menos 2 caracteres.');
       return;
     }
 
@@ -459,6 +619,12 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       }
     }
 
+    // Validar selección de sección/subsección obligatoria si se activa "Evaluar por secciones"
+    if (evaluarPorSecciones && !seccionSeleccionadaId) {
+      setErrorMessage('Has activado «Evaluar por secciones». Es obligatorio seleccionar una sección o subsección.');
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMessage(null);
 
@@ -468,6 +634,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         titulo: titulo.trim(),
         tipoRubrica: tipo,
         evaluacionPeriodo,
+        seccionId: evaluarPorSecciones ? seccionSeleccionadaId : null,
         descripcion: descripcion.trim() || null,
         items: apartados.map((a) => ({
           id: a.id,
@@ -483,6 +650,33 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           },
         })),
       });
+
+      // Si la vinculación de rúbricas está activa y se seleccionaron cursos destino, replicar automáticamente
+      if (replicarEnVinculados && gruposSeleccionadosParaReplicar.length > 0) {
+        const targets = (grupos || []).filter((g) => gruposSeleccionadosParaReplicar.includes(g.id));
+        if (targets.length > 0) {
+          try {
+            await replicarRubricaEnGrupos(
+              {
+                titulo: titulo.trim(),
+                tipoRubrica: tipo,
+                evaluacionPeriodo,
+                descripcion: descripcion.trim() || null,
+                items: apartados.map((a) => ({
+                  numero: a.numero,
+                  titulo: a.titulo.trim(),
+                  peso: a.peso,
+                  criterios: a.criterios,
+                  descriptores: a.descriptores,
+                })),
+              },
+              targets.map((t) => ({ id: t.id, nombre: t.nombre }))
+            );
+          } catch (repErr) {
+            console.warn('[RubricaCrearModal] Error no bloqueante al replicar en cursos vinculados:', repErr);
+          }
+        }
+      }
 
       onSuccess(resultado.rubrica, resultado.actividad, iniciarEvaluacionInmediata);
     } catch (err: any) {
@@ -631,7 +825,14 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto"
     >
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-3xl overflow-hidden flex flex-col max-h-[94vh] animate-in fade-in zoom-in-95 duration-150">
-        {/* Inputs ocultos de archivo para fotografía y Word */}
+        {/* Borde superior del modal distintivo según el curso seleccionado */}
+        <div
+          className="h-2 w-full shrink-0 transition-colors shadow-xs"
+          style={{ backgroundColor: cursoTheme.primary }}
+          title={`Curso activo: ${grupoNombre}`}
+        />
+
+        {/* Inputs ocultos de archivo para fotografía, galería y Word */}
         <input
           ref={fileInputFotoRef}
           type="file"
@@ -646,6 +847,13 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           capture="environment"
           className="hidden"
           onChange={handleFotoSelect}
+        />
+        <input
+          ref={fileInputGaleriaRef}
+          type="file"
+          accept="image/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          className="hidden"
+          onChange={handleGaleriaSelect}
         />
         <input
           ref={fileInputWordRef}
@@ -685,7 +893,9 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                 </select>
               </div>
               <p className="text-[10px] text-slate-400 mt-0.5">
-                Revisión de rúbrica asistida con Gemini y creación de la actividad vinculada en el cuaderno.
+                {origenInicial === 'manual'
+                  ? 'Creación manual de rúbrica y actividades evaluables para el cuaderno.'
+                  : 'Rúbrica estructurada con Gemini y vinculada a los criterios oficiales del grupo.'}
               </p>
             </div>
           </div>
@@ -702,23 +912,39 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         </div>
 
         {/* ========================================================
-            2. DEBAJO: TÍTULO DE LA ACTIVIDAD, EVALUAR ALUMNOS
+            2. DEBAJO: TÍTULO OBLIGATORIO DE LA RÚBRICA Y EVALUAR ALUMNOS
             ======================================================== */}
         <div className="bg-indigo-50/70 border-b border-indigo-100 px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <label htmlFor="modal-actividad-titulo" className="text-[11px] font-bold text-indigo-950 uppercase tracking-wider block mb-1">
-              Título de la actividad <span className="text-rose-500">*</span>
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label htmlFor="modal-actividad-titulo" className="text-[11px] font-bold text-indigo-950 uppercase tracking-wider">
+                Título de la rúbrica / actividad <span className="text-rose-600 font-extrabold">* (Obligatorio)</span>
+              </label>
+              {!titulo.trim() && (
+                <span className="text-[10px] text-amber-700 font-bold">
+                  ⚠️ Escribe el título antes de guardar
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <input
                 id="modal-actividad-titulo"
                 type="text"
                 value={titulo}
-                onChange={(e) => setTitulo(e.target.value)}
-                placeholder="Ej.: Examen tema 5, Comentario de texto lírico..."
-                className="flex-1 px-3 py-1.5 text-xs bg-white border border-indigo-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-slate-900 shadow-2xs"
+                onChange={(e) => {
+                  setTitulo(e.target.value);
+                  if (errorMessage && e.target.value.trim()) {
+                    setErrorMessage(null);
+                  }
+                }}
+                placeholder="Escribe el título de la rúbrica (obligatorio)..."
+                className={`flex-1 px-3 py-1.5 text-xs bg-white border rounded-lg focus:outline-none focus:ring-2 font-semibold text-slate-900 shadow-2xs ${
+                  !titulo.trim()
+                    ? 'border-amber-400 focus:ring-amber-500 bg-amber-50/30'
+                    : 'border-indigo-200 focus:ring-indigo-500'
+                }`}
               />
-              <div className="flex items-center gap-1 shrink-0">
+              <div className="flex items-center gap-1 shrink-0" title="Selecciona el tipo de rúbrica">
                 {(['ACTIVIDAD', 'TRABAJO', 'EXAMEN'] as TipoRubricaCrear[]).map((t) => (
                   <button
                     key={t}
@@ -744,7 +970,11 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
               onClick={() => handleSubmit(true)}
               disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Guardar la rúbrica y abrir inmediatamente la pantalla para calificar alumnos"
+              title={
+                !titulo.trim()
+                  ? 'Escribe el título de la rúbrica antes de evaluar'
+                  : 'Guardar la rúbrica y abrir inmediatamente la pantalla para calificar alumnos'
+              }
             >
               <GraduationCap className="w-3.5 h-3.5" />
               <span>Evaluar alumnos</span>
@@ -752,67 +982,168 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           </div>
         </div>
 
+        {/* Sub-barra: Evaluar por secciones (con secciones y subsecciones creadas por el docente) */}
+        <div className="bg-slate-50 border-b border-slate-200 px-5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={evaluarPorSecciones}
+              onChange={(e) => {
+                setEvaluarPorSecciones(e.target.checked);
+                if (!e.target.checked) setSeccionSeleccionadaId('');
+              }}
+              className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
+            />
+            <span className="font-bold text-slate-800 flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5 text-indigo-600" />
+              Evaluar por secciones
+            </span>
+          </label>
+
+          {evaluarPorSecciones && (
+            <div className="flex-1 sm:max-w-md w-full animate-in fade-in flex flex-col sm:flex-row sm:items-center gap-2">
+              <span className="text-[11px] font-bold text-slate-700 shrink-0">
+                Sección / Subsección <span className="text-rose-600 font-extrabold">*</span>:
+              </span>
+              <select
+                value={seccionSeleccionadaId}
+                onChange={(e) => {
+                  setSeccionSeleccionadaId(e.target.value);
+                  if (errorMessage) setErrorMessage(null);
+                }}
+                className={`w-full px-2.5 py-1.5 text-xs bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium cursor-pointer shadow-2xs ${
+                  !seccionSeleccionadaId
+                    ? 'border-amber-400 bg-amber-50/40 text-amber-950 font-bold'
+                    : 'border-slate-300 text-slate-900 font-semibold'
+                }`}
+              >
+                <option value="">-- Selecciona una sección o subsección (Obligatorio) --</option>
+                {arbolSecciones.length === 0 ? (
+                  <option value="" disabled>
+                    (No hay secciones creadas en este curso)
+                  </option>
+                ) : (
+                  arbolSecciones.map((item) => (
+                    <optgroup key={item.seccion.id} label={`📁 ${item.seccion.nombre}`}>
+                      <option value={item.seccion.id} className="font-bold text-slate-900">
+                        📁 {item.seccion.nombre} (Sección principal)
+                      </option>
+                      {item.subsecciones.map((sub) => (
+                        <option key={sub.id} value={sub.id} className="text-slate-700 pl-4">
+                          &nbsp;&nbsp;↳ {sub.nombre} (Subsección)
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))
+                )}
+              </select>
+            </div>
+          )}
+        </div>
+
         {/* ========================================================
-            3. DEBAJO: LA PROPUESTA DE RÚBRICA Y CONTENIDO
+            3. DEBAJO: ASISTENCIA Y CONTENIDO DE RÚBRICA
             ======================================================== */}
         <div className="p-5 overflow-y-auto space-y-4 text-slate-800 text-xs flex-1">
-          {/* Barra rápida de importación asistida con Gemini */}
-          <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-indigo-600" />
-                <span className="font-bold text-slate-800 text-xs">
-                  Importar o actualizar desde Word (.docx) o Foto
+          {/* OPCIÓN 3: RÚBRICA IA (PLANTEAMIENTO DIRECTO A GEMINI) */}
+          {origenInicial === 'ia' ? (
+            <div className="p-3.5 bg-gradient-to-br from-purple-50/80 to-indigo-50/80 border border-purple-200 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-600" />
+                  <span className="font-bold text-slate-900 text-xs">
+                    ¿Qué deseas evaluar con esta rúbrica?
+                  </span>
+                </div>
+                <span className="text-[10px] text-purple-700 font-mono font-medium">
+                  {criterios.length} criterios del grupo contrastados
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 font-medium">
-                {criterios.length} criterios oficiales registrados
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => fileInputFotoRef.current?.click()}
-                disabled={isAnalyzingWithGemini || isSubmitting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <Camera className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Foto de la rúbrica</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => fileInputWordRef.current?.click()}
-                disabled={isAnalyzingWithGemini || isSubmitting}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <FileText className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Documento Word (.docx)</span>
-              </button>
-            </div>
-
-            {isAnalyzingWithGemini && (
-              <div className="p-2 bg-indigo-100 border border-indigo-300 rounded-lg text-indigo-950 flex items-center gap-2 animate-pulse text-xs">
-                <Loader2 className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
-                <span>{analisisMessage || 'Analizando rúbrica con Gemini...'}</span>
+              <textarea
+                value={promptIaTexto}
+                onChange={(e) => setPromptIaTexto(e.target.value)}
+                placeholder="Describe el contenido, ejercicios o apartados deseados (ej.: Examen de Lengua del tema 4 con 3 apartados: análisis morfosintáctico, figuras retóricas y comentario crítico)..."
+                rows={3}
+                className="w-full p-2.5 text-xs bg-white border border-purple-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 font-medium text-slate-900 shadow-2xs resize-none"
+              />
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className="text-[10px] text-slate-500">
+                  Gemini estructurará la rúbrica y vinculará los apartados a los criterios oficiales.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleGenerarConGeminiIa}
+                  disabled={isAnalyzingWithGemini || isSubmitting || !promptIaTexto.trim()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 active:bg-purple-800 disabled:bg-purple-300 text-white font-bold text-xs shadow-2xs transition-all cursor-pointer disabled:cursor-not-allowed"
+                >
+                  {isAnalyzingWithGemini ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Generando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Generar rúbrica con Gemini</span>
+                    </>
+                  )}
+                </button>
               </div>
-            )}
+            </div>
+          ) : origenInicial === 'foto' && !archivoInicial && apartados.length === 0 && !isAnalyzingWithGemini ? (
+            /* En caso de que se haya cancelado la captura previa, botón directo para abrir la cámara */
+            <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span className="text-xs font-semibold text-indigo-950">
+                  Fotografía de la rúbrica pendiente de captura
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => fileInputCamaraRef.current?.click()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold text-xs shadow-2xs transition-all cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Abrir cámara para fotografiar</span>
+              </button>
+            </div>
+          ) : null}
 
-            {analisisError && (
-              <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2 text-xs">
-                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+          {/* Estado de análisis con Gemini */}
+          {isAnalyzingWithGemini && (
+            <div className="p-2.5 bg-indigo-100 border border-indigo-300 rounded-lg text-indigo-950 flex items-center gap-2 animate-pulse text-xs">
+              <Loader2 className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
+              <span>{analisisMessage || 'Analizando material con Gemini y alineando criterios oficiales...'}</span>
+            </div>
+          )}
+
+          {/* Mensaje de error de análisis */}
+          {analisisError && (
+            <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-start gap-2 text-xs">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
                 <span>{analisisError}</span>
+                {origenInicial === 'foto' && (
+                  <button
+                    type="button"
+                    onClick={() => fileInputCamaraRef.current?.click()}
+                    className="mt-1 text-xs text-rose-700 font-bold underline block cursor-pointer"
+                  >
+                    Volver a abrir la cámara para repetir la fotografía
+                  </button>
+                )}
               </div>
-            )}
+            </div>
+          )}
 
-            {analisisSuccessMessage && (
-              <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 flex items-start gap-2 text-xs">
-                <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                <span>{analisisSuccessMessage}</span>
-              </div>
-            )}
-          </div>
+          {/* Mensaje de éxito de análisis */}
+          {analisisSuccessMessage && (
+            <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 flex items-start gap-2 text-xs">
+              <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <span>{analisisSuccessMessage}</span>
+            </div>
+          )}
 
           {errorMessage && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 flex items-start gap-2 text-xs">
@@ -1185,6 +1516,70 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                 })}
               </div>
             )}
+
+            {/* ========================================================
+                VINCULACIÓN ACTIVA DE RÚBRICAS ENTRE CURSOS
+                ======================================================== */}
+            {gruposVinculados.length > 0 && (
+              <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3.5 space-y-2 mt-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Link2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <span className="text-xs font-bold text-indigo-900">
+                      Replicación en cursos vinculados ({gruposVinculados.length})
+                    </span>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={replicarEnVinculados}
+                      onChange={(e) => setReplicarEnVinculados(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <span className="text-xs font-semibold text-indigo-900">
+                      Replicar esta rúbrica automáticamente
+                    </span>
+                  </label>
+                </div>
+
+                {replicarEnVinculados && (
+                  <div className="space-y-1.5 pt-1.5 border-t border-indigo-100">
+                    <p className="text-[11px] text-indigo-700">
+                      Selecciona los cursos vinculados en los que deseas crear esta rúbrica:
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {gruposVinculados.map((g) => {
+                        const isChecked = gruposSeleccionadosParaReplicar.includes(g.id);
+                        return (
+                          <label
+                            key={g.id}
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
+                              isChecked
+                                ? 'bg-white border-indigo-300 text-indigo-950 shadow-2xs'
+                                : 'bg-indigo-100/40 border-indigo-200 text-indigo-400'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setGruposSeleccionadosParaReplicar((prev) => [...prev, g.id]);
+                                } else {
+                                  setGruposSeleccionadosParaReplicar((prev) => prev.filter((id) => id !== g.id));
+                                }
+                              }}
+                              className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <span>{g.nombre}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1207,6 +1602,13 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
               onClick={() => handleSubmit(false)}
               disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
               className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:bg-indigo-300 text-white font-bold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              title={
+                !titulo.trim()
+                  ? 'Es obligatorio escribir el título de la rúbrica antes de guardarla'
+                  : apartados.length === 0
+                  ? 'Añade al menos una actividad o apartado'
+                  : 'Guardar rúbrica y actividades en el cuaderno'
+              }
             >
               {isSubmitting ? (
                 <>
@@ -1226,6 +1628,13 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
               onClick={() => handleSubmit(true)}
               disabled={isSubmitting || !titulo.trim() || apartados.length === 0}
               className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-emerald-300 text-white font-bold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              title={
+                !titulo.trim()
+                  ? 'Es obligatorio escribir el título de la rúbrica antes de guardarla'
+                  : apartados.length === 0
+                  ? 'Añade al menos una actividad o apartado'
+                  : 'Guardar la rúbrica y abrir inmediatamente la pantalla para calificar alumnos'
+              }
             >
               <GraduationCap className="w-3.5 h-3.5" />
               <span>Guardar y Evaluar Alumnos</span>

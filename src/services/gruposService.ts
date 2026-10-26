@@ -8,6 +8,7 @@ import { CuadernoGrupoData } from '../types';
 import { recuperarRespaldoCalificacionesApartados, purgarActividadesDeRespaldoLocal } from './calificacionesService';
 import { getRubricasEliminadasLocal } from './rubricasService';
 import { compararCodigosCriterio } from '../utils/rubricaUtils';
+import { fusionarCriteriosConOverlayLocal } from './criteriosStorageService';
 
 export interface GrupoDocente {
   id: string;
@@ -235,10 +236,11 @@ export async function fetchCuadernoGrupo(
       });
     }
 
-    // Orden de criterios: 10.1 y 10.2 en último lugar
-    if (Array.isArray(resultado.criterios)) {
-      resultado.criterios.sort((a, b) => compararCodigosCriterio(a.codigo, b.codigo));
-    }
+    // Fusionar criterios y ponderaciones con el overlay local persistente
+    resultado.criterios = fusionarCriteriosConOverlayLocal(
+      resultado.grupo.id,
+      resultado.criterios || []
+    );
 
     return resultado;
   } catch (err: any) {

@@ -24,7 +24,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion, CalificacionApartado } from '../../types';
-import { normalizeRubrica, NormalizedRubrica, compararCodigosCriterio, compararCriterios } from '../../utils/rubricaUtils';
+import { normalizeRubrica, NormalizedRubrica, compararCodigosCriterio, compararCriterios, compararSecciones } from '../../utils/rubricaUtils';
+import { CriterioDetalleModal } from './CriterioDetalleModal';
 
 export interface EvidenciaItem {
   actividadId: string;
@@ -34,6 +35,10 @@ export interface EvidenciaItem {
   tipoActividad?: string;
   metodo?: string;
   nota: number;
+  apartadoId?: string;
+  rubricaId?: string;
+  calificacionId?: number | string;
+  isApartado?: boolean;
 }
 
 interface TooltipData {
@@ -48,13 +53,28 @@ interface TooltipData {
 }
 
 export const ActividadesView: React.FC = () => {
-  const { cuadernoData, selectedEvaluacion, setActiveTab, eliminarActividades } = useCuaderno();
+  const {
+    cuadernoData,
+    selectedEvaluacion,
+    setActiveTab,
+    eliminarActividades,
+    updateCalificaciones,
+    updateCalificacionesApartados,
+    selectedGrupoId,
+  } = useCuaderno();
 
   // Caso A (Criterios) vs Caso B (Secciones)
   const [modoEvaluacion, setModoEvaluacion] = useState<'criterios' | 'secciones'>('criterios');
 
   // Alternar entre la Tabla de Evaluación principal y el Catálogo de Actividades
   const [vistaActiva, setVistaActiva] = useState<'tabla' | 'catalogo'>('tabla');
+
+  // Estado del modal de detalle de criterio (para modificar notas o eliminar actividades al pulsar en la media)
+  const [modalCriterioData, setModalCriterioData] = useState<{
+    alumno: Alumno;
+    criterio: Criterio;
+    evidencias: EvidenciaItem[];
+  } | null>(null);
 
   // Selector de período para la Columna Extra de Nota Media en Caso A
   const [periodoMediaExtra, setPeriodoMediaExtra] = useState<'1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global'>('Global');
@@ -93,7 +113,10 @@ export const ActividadesView: React.FC = () => {
     return list.slice().sort(compararCriterios);
   }, [cuadernoData?.criterios]);
   const actividades = useMemo(() => cuadernoData?.actividades || [], [cuadernoData?.actividades]);
-  const secciones = useMemo(() => cuadernoData?.secciones || [], [cuadernoData?.secciones]);
+  const secciones = useMemo(() => {
+    const list = cuadernoData?.secciones || [];
+    return list.slice().sort(compararSecciones);
+  }, [cuadernoData?.secciones]);
   const rubricas = useMemo(() => cuadernoData?.rubricas || [], [cuadernoData?.rubricas]);
   const calificaciones = useMemo(() => cuadernoData?.calificaciones || [], [cuadernoData?.calificaciones]);
   const calificacionesApartados = useMemo(
@@ -280,13 +303,16 @@ export const ActividadesView: React.FC = () => {
       const fecha = formatearFechaEvaluacion(ca.updated_at, act?.evaluacion_periodo);
 
       evidencias.push({
-        actividadId: act?.id || ca.rubrica_id,
+        actividadId: act?.id || ca.actividad_id || ca.rubrica_id,
         actividadNombre: nombreActividad,
         fechaEvaluacion: fecha,
         instrumento: nombreInstrumento,
         tipoActividad: act?.tipo || 'Rúbrica',
         metodo: act?.metodo || undefined,
         nota: Number(ca.nota),
+        apartadoId: ca.apartado_id,
+        rubricaId: ca.rubrica_id,
+        isApartado: true,
       });
     }
 
@@ -333,6 +359,8 @@ export const ActividadesView: React.FC = () => {
           tipoActividad: act.tipo,
           metodo: act.metodo || undefined,
           nota: Number(cal.nota),
+          calificacionId: cal.id,
+          isApartado: false,
         });
       }
     }
@@ -962,7 +990,15 @@ export const ActividadesView: React.FC = () => {
                               return (
                                 <td
                                   key={criterio.id}
-                                  className="py-2 px-2 text-center border-r border-slate-200 font-mono text-xs transition-colors hover:bg-indigo-50/70 cursor-help"
+                                  onClick={() => {
+                                    setModalCriterioData({
+                                      alumno,
+                                      criterio,
+                                      evidencias,
+                                    });
+                                  }}
+                                  title={`Pulsar para ver actividades, modificar notas o eliminar actividades del criterio ${criterio.codigo} para ${alumno.nombre}`}
+                                  className="py-2 px-2 text-center border-r border-slate-200 font-mono text-xs transition-all hover:bg-indigo-100 hover:ring-2 hover:ring-indigo-400 hover:ring-inset cursor-pointer select-none"
                                   onMouseEnter={(e) =>
                                     handleCellMouseEnter(
                                       e,
@@ -986,6 +1022,16 @@ export const ActividadesView: React.FC = () => {
                                     )
                                   }
                                   onBlur={handleCellMouseLeave}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      e.preventDefault();
+                                      setModalCriterioData({
+                                        alumno,
+                                        criterio,
+                                        evidencias,
+                                      });
+                                    }
+                                  }}
                                 >
                                   {mediaNota !== null ? (
                                     <span
@@ -1682,6 +1728,24 @@ export const ActividadesView: React.FC = () => {
             )}
           </div>
         </div>
+      )}
+
+      {/* Modal de detalle de criterio para modificar nota o eliminar actividades */}
+      {modalCriterioData && (
+        <CriterioDetalleModal
+          alumno={modalCriterioData.alumno}
+          criterio={modalCriterioData.criterio}
+          evidenciasIniciales={modalCriterioData.evidencias}
+          grupoId={selectedGrupoId || cuadernoData?.grupo?.id || ''}
+          calificaciones={cuadernoData?.calificaciones || []}
+          calificacionesApartados={cuadernoData?.calificacionesApartados || []}
+          onClose={() => setModalCriterioData(null)}
+          onUpdateCalificaciones={updateCalificaciones}
+          onUpdateCalificacionesApartados={updateCalificacionesApartados}
+          onEliminarActividad={async (actId) => {
+            await eliminarActividades([actId]);
+          }}
+        />
       )}
     </div>
   );

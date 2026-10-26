@@ -20,8 +20,12 @@ import {
   RefreshCw,
   Info,
   Scale,
+  Link2,
+  CheckCheck,
+  ArrowRight,
 } from 'lucide-react';
 import { useCuaderno } from '../../../context/CuadernoContext';
+import { useAuth } from '../../../context/AuthContext';
 import { Criterio } from '../../../types';
 import {
   crearCriterio,
@@ -29,17 +33,43 @@ import {
   actualizarPonderacionCriterio,
   eliminarCriterios,
 } from '../../../services/gestionDatosService';
+import {
+  obtenerGruposVinculadosCon,
+  sincronizarCriteriosConGruposVinculados,
+  replicarPonderacionEnGruposVinculados,
+  replicarCriterioEnGruposVinculados,
+  ResultadoSincronizacionGrupo,
+} from '../../../services/vinculacionCriteriosService';
 import { compararCriterios } from '../../../utils/rubricaUtils';
 import { ImportarCriteriosModal } from './ImportarCriteriosModal';
 
 export const GestionCriterios: React.FC = () => {
+  const { user } = useAuth();
   const {
     cuadernoData,
+    grupos,
     selectedGrupo,
     selectedGrupoId,
     refreshCuaderno,
     isLoadingCuaderno,
+    updateCriterioPonderacion,
   } = useCuaderno();
+
+  // Grupos vinculados con el curso seleccionado
+  const gruposVinculadosIds = useMemo(() => {
+    if (!selectedGrupoId) return [];
+    return obtenerGruposVinculadosCon(selectedGrupoId, user?.uid);
+  }, [selectedGrupoId, user?.uid]);
+
+  const gruposVinculados = useMemo(() => {
+    return grupos.filter((g) => gruposVinculadosIds.includes(g.id));
+  }, [grupos, gruposVinculadosIds]);
+
+  // Toggle para aplicar cambios automáticamente en grupos vinculados
+  const [aplicarEnVinculados, setAplicarEnVinculados] = useState<boolean>(true);
+  const [isSyncingAll, setIsSyncingAll] = useState<boolean>(false);
+  const [showSyncModal, setShowSyncModal] = useState<boolean>(false);
+  const [syncResultados, setSyncResultados] = useState<ResultadoSincronizacionGrupo[] | null>(null);
 
   // Lista ordenada de criterios garantizando 10.1 y 10.2 en último lugar
   const criterios: Criterio[] = useMemo(() => {
@@ -63,9 +93,10 @@ export const GestionCriterios: React.FC = () => {
   const [pondEditando, setPondEditando] = useState<string>('');
   const [isGuardandoEdicion, setIsGuardandoEdicion] = useState(false);
 
-  // Edición inline rápida de ponderaciones individuales
+  // Edición inline rápida de ponderaciones individuales y guardado en lote
   const [savingPonderacionId, setSavingPonderacionId] = useState<number | null>(null);
   const [inlinePonderaciones, setInlinePonderaciones] = useState<Record<number, string>>({});
+  const [isGuardandoLotePond, setIsGuardandoLotePond] = useState(false);
 
   // Selección múltiple
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -82,6 +113,26 @@ export const GestionCriterios: React.FC = () => {
   const clearMessages = () => {
     setMensajeExito(null);
     setErrorOperacion(null);
+  };
+
+  // Selección automática de todo el contenido al recibir foco o clic para permitir sobreescribir sin borrar
+  const handleAutoSelect = (
+    e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement> | React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const target = e.currentTarget;
+    setTimeout(() => {
+      if (target && typeof target.select === 'function') {
+        target.select();
+      }
+    }, 0);
+  };
+
+  // Si un campo numérico contiene un cero por defecto y se escribe un valor nuevo, eliminar el 0 inicial (ej: '05' -> '5')
+  const limpiarCeroInicial = (val: string): string => {
+    if (val.length > 1 && val.startsWith('0') && !val.startsWith('0.') && !val.startsWith('0,')) {
+      return val.replace(/^0+/, '');
+    }
+    return val;
   };
 
   const criteriosFiltrados = useMemo(() => {
@@ -132,7 +183,26 @@ export const GestionCriterios: React.FC = () => {
       setNuevoCodigo('');
       setNuevaDescripcion('');
       setNuevaPonderacion('');
-      setMensajeExito(`Criterio «${nuevo.codigo}» creado correctamente en Supabase.`);
+
+      let msg = `Criterio «${nuevo.codigo}» creado correctamente en Supabase.`;
+      if (aplicarEnVinculados && gruposVinculados.length > 0) {
+        try {
+          const resVinc = await replicarCriterioEnGruposVinculados(
+            cleanCod,
+            cleanDesc,
+            pondVal,
+            gruposVinculados
+          );
+          const okCount = resVinc.reduce((acc, r) => acc + (r.success ? 1 : 0), 0);
+          if (okCount > 0) {
+            msg += ` Replicado en ${okCount} ${okCount === 1 ? 'curso vinculado' : 'cursos vinculados'}.`;
+          }
+        } catch (vErr) {
+          console.warn('[GestionCriterios] Error al replicar en cursos vinculados:', vErr);
+        }
+      }
+
+      setMensajeExito(msg);
       await refreshCuaderno(true);
     } catch (err: any) {
       console.error('[GestionCriterios] Error al crear criterio:', err);
@@ -188,7 +258,26 @@ export const GestionCriterios: React.FC = () => {
         pondVal
       );
       setEditandoId(null);
-      setMensajeExito(`Criterio «${actualizado.codigo}» actualizado correctamente.`);
+
+      let msg = `Criterio «${actualizado.codigo}» actualizado correctamente.`;
+      if (aplicarEnVinculados && gruposVinculados.length > 0) {
+        try {
+          const resVinc = await replicarCriterioEnGruposVinculados(
+            cleanCod,
+            cleanDesc,
+            pondVal,
+            gruposVinculados
+          );
+          const okCount = resVinc.reduce((acc, r) => acc + (r.success ? 1 : 0), 0);
+          if (okCount > 0) {
+            msg += ` Sincronizado en ${okCount} ${okCount === 1 ? 'curso vinculado' : 'cursos vinculados'}.`;
+          }
+        } catch (vErr) {
+          console.warn('[GestionCriterios] Error al replicar en cursos vinculados:', vErr);
+        }
+      }
+
+      setMensajeExito(msg);
       await refreshCuaderno(true);
     } catch (err: any) {
       console.error('[GestionCriterios] Error al actualizar criterio:', err);
@@ -213,24 +302,140 @@ export const GestionCriterios: React.FC = () => {
       pondVal = parsed;
     }
 
+    const criterio = criterios.find((c) => c.id === criterioId);
+
     setSavingPonderacionId(criterioId);
     clearMessages();
 
+    // Actualización optimista inmediata en memoria para no perder foco ni valor
+    updateCriterioPonderacion(criterioId, pondVal);
+
     try {
-      await actualizarPonderacionCriterio(selectedGrupoId, criterioId, pondVal);
-      // Limpiar del estado local inline y refrescar
+      await actualizarPonderacionCriterio(
+        selectedGrupoId,
+        criterioId,
+        pondVal,
+        criterio?.codigo,
+        criterio?.descripcion
+      );
+
+      // Limpiar del estado local de borradores
       setInlinePonderaciones((prev) => {
         const copy = { ...prev };
         delete copy[criterioId];
         return copy;
       });
-      setMensajeExito(`Ponderación actualizada en Supabase.`);
-      await refreshCuaderno(true);
+
+      let msg = `Ponderación guardada correctamente.`;
+
+      // Replicar en cursos vinculados si la opción está activa
+      if (aplicarEnVinculados && gruposVinculados.length > 0 && criterio?.codigo) {
+        try {
+          const resVinc = await replicarPonderacionEnGruposVinculados(
+            criterio.codigo,
+            pondVal,
+            gruposVinculados
+          );
+          const okCount = resVinc.reduce((acc, r) => acc + (r.success ? 1 : 0), 0);
+          if (okCount > 0) {
+            msg = `Ponderación guardada y replicada en ${okCount} ${okCount === 1 ? 'curso vinculado' : 'cursos vinculados'}.`;
+          }
+        } catch (vErr) {
+          console.warn('[GestionCriterios] Error al replicar ponderación en vinculados:', vErr);
+        }
+      }
+
+      setMensajeExito(msg);
     } catch (err: any) {
       console.error('[GestionCriterios] Error al guardar ponderación:', err);
       setErrorOperacion(err?.message || 'Error al persistir la ponderación.');
     } finally {
       setSavingPonderacionId(null);
+    }
+  };
+
+  // Guardar todas las ponderaciones que han sido editadas en lote
+  const handleGuardarTodasPonderaciones = async () => {
+    if (!selectedGrupoId) return;
+    const idsModificados = Object.keys(inlinePonderaciones).map(Number);
+    if (idsModificados.length === 0) return;
+
+    setIsGuardandoLotePond(true);
+    clearMessages();
+
+    let guardados = 0;
+    try {
+      for (const id of idsModificados) {
+        const raw = inlinePonderaciones[id];
+        const criterio = criterios.find((c) => c.id === id);
+        let pondVal: number | null = null;
+        if (raw && raw.trim() !== '') {
+          const parsed = parseFloat(raw.trim().replace(',', '.'));
+          if (!isNaN(parsed) && parsed >= 0) pondVal = parsed;
+        }
+
+        // Actualizar optimista
+        updateCriterioPonderacion(id, pondVal);
+
+        await actualizarPonderacionCriterio(
+          selectedGrupoId,
+          id,
+          pondVal,
+          criterio?.codigo,
+          criterio?.descripcion
+        );
+
+        if (aplicarEnVinculados && gruposVinculados.length > 0 && criterio?.codigo) {
+          await replicarPonderacionEnGruposVinculados(
+            criterio.codigo,
+            pondVal,
+            gruposVinculados
+          );
+        }
+        guardados++;
+      }
+
+      setInlinePonderaciones({});
+      setMensajeExito(
+        `Se han guardado correctamente ${guardados} ${guardados === 1 ? 'ponderación' : 'ponderaciones'}${
+          aplicarEnVinculados && gruposVinculados.length > 0
+            ? ` y sincronizado con ${gruposVinculados.map((g) => g.nombre).join(', ')}`
+            : ''
+        }.`
+      );
+    } catch (err: any) {
+      console.error('[GestionCriterios] Error guardando lote de ponderaciones:', err);
+      setErrorOperacion(err?.message || 'Error al persistir algunas ponderaciones.');
+    } finally {
+      setIsGuardandoLotePond(false);
+    }
+  };
+
+  // Sincronizar todos los criterios del curso actual con los cursos vinculados
+  const handleSincronizarTodosConVinculados = async () => {
+    if (!selectedGrupoId || gruposVinculados.length === 0 || criterios.length === 0) return;
+
+    setIsSyncingAll(true);
+    clearMessages();
+
+    try {
+      const resultados = await sincronizarCriteriosConGruposVinculados(
+        selectedGrupoId,
+        criterios,
+        gruposVinculados,
+        {
+          actualizarPonderacion: true,
+          actualizarDescripcion: true,
+          crearFaltantes: true,
+        }
+      );
+      setSyncResultados(resultados);
+      setShowSyncModal(true);
+    } catch (err: any) {
+      console.error('[GestionCriterios] Error al sincronizar con grupos vinculados:', err);
+      setErrorOperacion(err?.message || 'Error al sincronizar criterios con los cursos vinculados.');
+    } finally {
+      setIsSyncingAll(false);
     }
   };
 
@@ -347,6 +552,66 @@ export const GestionCriterios: React.FC = () => {
         </ul>
       </div>
 
+      {/* Panel de Vinculación de Cursos para Criterios */}
+      {gruposVinculados.length > 0 ? (
+        <div className="bg-gradient-to-r from-indigo-50/90 via-indigo-50/60 to-purple-50/60 border border-indigo-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs animate-in fade-in">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0">
+              <Link2 className="w-4 h-4" />
+            </div>
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-indigo-950 text-xs">
+                  Cursos vinculados a {selectedGrupo?.nombre}:
+                </span>
+                <span className="font-semibold text-indigo-800 bg-white border border-indigo-200 px-2.5 py-0.5 rounded-lg text-[11px] shadow-2xs">
+                  {gruposVinculados.map((g) => g.nombre).join(', ')}
+                </span>
+              </div>
+              <p className="text-[11px] text-indigo-700/90 leading-relaxed">
+                Toda la información de criterios y ponderaciones puede sincronizarse y replicarse automáticamente entre cursos paralelos.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <label className="flex items-center gap-2 text-xs text-indigo-950 font-bold cursor-pointer select-none bg-white/90 hover:bg-white px-3 py-2 rounded-xl border border-indigo-200 shadow-2xs transition-all">
+              <input
+                type="checkbox"
+                checked={aplicarEnVinculados}
+                onChange={(e) => setAplicarEnVinculados(e.target.checked)}
+                className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer w-3.5 h-3.5"
+              />
+              <span>Replicar cambios automáticamente</span>
+            </label>
+
+            <button
+              type="button"
+              onClick={handleSincronizarTodosConVinculados}
+              disabled={isSyncingAll || criterios.length === 0}
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              title="Copiar o sincronizar todos los códigos, descripciones y ponderaciones del curso actual en los cursos vinculados"
+            >
+              {isSyncingAll ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5" />
+              )}
+              <span>Sincronizar todo</span>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-slate-50/80 border border-slate-200/80 rounded-xl px-3.5 py-2.5 flex items-center justify-between text-[11px] text-slate-500">
+          <div className="flex items-center gap-2">
+            <Info className="w-4 h-4 text-indigo-500 shrink-0" />
+            <span>
+              <strong>¿Impartes cursos paralelos (ej: 1º ESO A y 1º ESO B)?</strong> Puedes vincularlos desde la pestaña <em>Cursos</em> para que compartan automáticamente criterios y ponderaciones.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Barra de acciones: Formulario de creación + Importación */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {/* Formulario nuevo criterio */}
@@ -358,28 +623,49 @@ export const GestionCriterios: React.FC = () => {
           <form onSubmit={handleCrear} className="space-y-2">
             <div className="flex flex-col sm:flex-row gap-2">
               <input
+                id="nuevo-criterio-codigo"
                 type="text"
                 value={nuevoCodigo}
                 onChange={(e) => setNuevoCodigo(e.target.value)}
+                onFocus={handleAutoSelect}
+                onClick={handleAutoSelect}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    document.getElementById('nuevo-criterio-desc')?.focus();
+                  }
+                }}
                 placeholder="Código (ej: 1.1, 2.3, 10.1)"
                 disabled={isCreando}
                 className="w-full sm:w-36 px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-slate-900"
               />
               <input
+                id="nuevo-criterio-desc"
                 type="text"
                 value={nuevaDescripcion}
                 onChange={(e) => setNuevaDescripcion(e.target.value)}
+                onFocus={handleAutoSelect}
+                onClick={handleAutoSelect}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    document.getElementById('nuevo-criterio-pond')?.focus();
+                  }
+                }}
                 placeholder="Descripción del criterio de evaluación..."
                 disabled={isCreando}
                 className="flex-1 px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900"
               />
               <input
+                id="nuevo-criterio-pond"
                 type="number"
                 min="0"
                 max="100"
                 step="0.5"
                 value={nuevaPonderacion}
-                onChange={(e) => setNuevaPonderacion(e.target.value)}
+                onChange={(e) => setNuevaPonderacion(limpiarCeroInicial(e.target.value))}
+                onFocus={handleAutoSelect}
+                onClick={handleAutoSelect}
                 placeholder="Pond. %"
                 disabled={isCreando}
                 className="w-full sm:w-20 px-2 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900 text-center"
@@ -441,10 +727,30 @@ export const GestionCriterios: React.FC = () => {
                 type="text"
                 value={busqueda}
                 onChange={(e) => setBusqueda(e.target.value)}
+                onFocus={handleAutoSelect}
+                onClick={handleAutoSelect}
                 placeholder="Filtrar código o texto..."
                 className="pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 w-44"
               />
             </div>
+
+            {/* Botón para guardar cambios de ponderación en lote si se han modificado varias casillas */}
+            {Object.keys(inlinePonderaciones).length > 0 && (
+              <button
+                type="button"
+                onClick={handleGuardarTodasPonderaciones}
+                disabled={isGuardandoLotePond}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                title="Guardar todos los cambios de ponderación pendientes en Supabase"
+              >
+                {isGuardandoLotePond ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CheckCheck className="w-3.5 h-3.5" />
+                )}
+                <span>Guardar ponderaciones ({Object.keys(inlinePonderaciones).length})</span>
+              </button>
+            )}
 
             {selectedIds.length > 0 && (
               <button
@@ -506,7 +812,7 @@ export const GestionCriterios: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {criteriosFiltrados.map((criterio) => {
+                  {criteriosFiltrados.map((criterio, index) => {
                     const isSelected = selectedIds.includes(criterio.id);
                     const estaEditando = editandoId === criterio.id;
                     const isSavingPond = savingPonderacionId === criterio.id;
@@ -539,6 +845,8 @@ export const GestionCriterios: React.FC = () => {
                               type="text"
                               value={codigoEditando}
                               onChange={(e) => setCodigoEditando(e.target.value)}
+                              onFocus={handleAutoSelect}
+                              onClick={handleAutoSelect}
                               className="w-16 px-1.5 py-1 text-xs border border-indigo-400 rounded focus:outline-none"
                             />
                           ) : (
@@ -552,6 +860,8 @@ export const GestionCriterios: React.FC = () => {
                             <textarea
                               value={descEditando}
                               onChange={(e) => setDescEditando(e.target.value)}
+                              onFocus={handleAutoSelect}
+                              onClick={handleAutoSelect}
                               rows={2}
                               className="w-full px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                             />
@@ -569,25 +879,36 @@ export const GestionCriterios: React.FC = () => {
                               max="100"
                               step="0.5"
                               value={pondEditando}
-                              onChange={(e) => setPondEditando(e.target.value)}
+                              onChange={(e) => setPondEditando(limpiarCeroInicial(e.target.value))}
+                              onFocus={handleAutoSelect}
+                              onClick={handleAutoSelect}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleGuardarEdicion(criterio.id);
+                                }
+                              }}
                               className="w-16 px-1.5 py-1 text-xs text-center border border-indigo-400 rounded focus:outline-none"
                               placeholder="%"
                             />
                           ) : (
                             <div className="inline-flex items-center gap-1 justify-center">
                               <input
+                                id={`criterio-pond-input-${index}`}
                                 type="number"
                                 min="0"
                                 max="100"
                                 step="0.5"
                                 value={valorPondActual}
                                 onChange={(e) => {
-                                  const val = e.target.value;
+                                  const val = limpiarCeroInicial(e.target.value);
                                   setInlinePonderaciones((prev) => ({
                                     ...prev,
                                     [criterio.id]: val,
                                   }));
                                 }}
+                                onFocus={handleAutoSelect}
+                                onClick={handleAutoSelect}
                                 onBlur={(e) => {
                                   // Solo guardar si cambió respecto al valor original
                                   const origStr =
@@ -600,7 +921,46 @@ export const GestionCriterios: React.FC = () => {
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') {
-                                    (e.target as HTMLInputElement).blur();
+                                    e.preventDefault();
+                                    const currentVal = (e.currentTarget as HTMLInputElement).value;
+                                    const origStr =
+                                      criterio.ponderacion !== null && criterio.ponderacion !== undefined
+                                        ? String(criterio.ponderacion)
+                                        : '';
+                                    if (currentVal.trim() !== origStr.trim()) {
+                                      handleGuardarPonderacionInline(criterio.id, currentVal);
+                                    }
+                                    // Seleccionar automáticamente el campo que se encuentre debajo (siguiente fila)
+                                    const nextInput = document.getElementById(
+                                      `criterio-pond-input-${index + 1}`
+                                    ) as HTMLInputElement | null;
+                                    if (nextInput) {
+                                      nextInput.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                                      nextInput.focus();
+                                      setTimeout(() => nextInput.select(), 0);
+                                    } else {
+                                      (e.currentTarget as HTMLInputElement).blur();
+                                    }
+                                  } else if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    const nextInput = document.getElementById(
+                                      `criterio-pond-input-${index + 1}`
+                                    ) as HTMLInputElement | null;
+                                    if (nextInput) {
+                                      nextInput.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                                      nextInput.focus();
+                                      setTimeout(() => nextInput.select(), 0);
+                                    }
+                                  } else if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    const prevInput = document.getElementById(
+                                      `criterio-pond-input-${index - 1}`
+                                    ) as HTMLInputElement | null;
+                                    if (prevInput) {
+                                      prevInput.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                                      prevInput.focus();
+                                      setTimeout(() => prevInput.select(), 0);
+                                    }
                                   }
                                 }}
                                 placeholder="Sin peso"
@@ -612,7 +972,7 @@ export const GestionCriterios: React.FC = () => {
                                     ? 'bg-amber-50 border-amber-400 font-bold'
                                     : 'bg-slate-50 border-slate-200 hover:border-slate-300'
                                 }`}
-                                title="Casilla editable de ponderación. Modifica y presiona Enter o haz clic fuera para guardar en Supabase."
+                                title="Casilla editable de ponderación. Modifica y presiona Enter para pasar a la fila de abajo o haz clic fuera para guardar."
                               />
                               {isSavingPond && <Loader2 className="w-3 h-3 text-indigo-600 animate-spin" />}
                             </div>
@@ -751,6 +1111,89 @@ export const GestionCriterios: React.FC = () => {
             refreshCuaderno(true);
           }}
         />
+      )}
+
+      {/* Modal de resultados de sincronización con cursos vinculados */}
+      {showSyncModal && syncResultados && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 border border-slate-200 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl">
+                  <Link2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Sincronización de Criterios Completada
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    Origen: {selectedGrupo?.nombre}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5 max-h-72 overflow-y-auto">
+              {syncResultados.map((res) => (
+                <div
+                  key={res.grupoId}
+                  className={`p-3 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+                    res.success
+                      ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                      : 'bg-rose-50/70 border-rose-200 text-rose-900'
+                  }`}
+                >
+                  <div className="space-y-1">
+                    <p className="font-bold flex items-center gap-1.5">
+                      {res.success ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      )}
+                      <span>{res.grupoNombre}</span>
+                    </p>
+                    {res.success ? (
+                      <p className="text-[11px] text-emerald-700">
+                        {res.actualizados} criterios actualizados (ponderación/texto) · {res.creados} nuevos criterios dados de alta.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-rose-700">{res.error}</p>
+                    )}
+                  </div>
+                  <span className="font-bold text-[10px] uppercase px-2 py-0.5 rounded-full bg-white/80 shadow-2xs">
+                    {res.success ? 'Sincronizado' : 'Error'}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs text-slate-600">
+              <p className="font-semibold text-slate-800">
+                Coherencia evaluativa garantizada:
+              </p>
+              <p className="text-[11px] mt-0.5">
+                Los cursos vinculados ahora disponen de los mismos criterios y ponderaciones para las evaluaciones y rúbricas.
+              </p>
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setShowSyncModal(false)}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer"
+              >
+                Entendido
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

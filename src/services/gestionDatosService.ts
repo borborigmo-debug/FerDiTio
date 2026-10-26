@@ -8,6 +8,22 @@ import { Alumno, Criterio, Seccion, Grupo } from '../types';
 import { GrupoDocente } from './gruposService';
 import { extractDocxTextAndTables } from '../utils/geminiRubricaImportUtils';
 import * as XLSX from 'xlsx';
+import {
+  guardarPonderacionLocal,
+  guardarCriterioLocal,
+  registrarCriteriosEliminadosLocal,
+  obtenerCriteriosLocales,
+  guardarPonderacionesLoteLocal,
+} from './criteriosStorageService';
+
+export function isEdgeFunctionMissingHandlerError(err: any): boolean {
+  const msg = err?.message || String(err || '');
+  return (
+    msg.includes('todavía no tiene desplegado el controlador') ||
+    msg.includes('Se requiere al menos una calificación') ||
+    msg.includes('controlador para la operación')
+  );
+}
 
 const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
 
@@ -193,18 +209,41 @@ export async function crearCriterio(
     }
   }
 
-  const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
-    tipo: 'crear_criterio',
-    grupoId,
+  const pondVal = ponderacion !== null && ponderacion !== undefined ? ponderacion : null;
+  const tempId = Math.floor(Date.now() / 1000) * 1000 + Math.floor(Math.random() * 999);
+  const criterioLocal: Criterio = {
+    id: tempId,
     codigo: cleanCodigo,
     descripcion: cleanDesc,
-    ponderacion: ponderacion !== null && ponderacion !== undefined ? ponderacion : null,
-  });
+    ponderacion: pondVal,
+    grupo_id: grupoId,
+  };
 
-  if (!res?.criterio) {
-    throw new Error('El servidor no confirmó la creación del criterio.');
+  try {
+    const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
+      tipo: 'crear_criterio',
+      grupoId,
+      codigo: cleanCodigo,
+      descripcion: cleanDesc,
+      ponderacion: pondVal,
+    });
+
+    if (res?.criterio) {
+      guardarCriterioLocal(grupoId, res.criterio);
+      return res.criterio;
+    }
+    guardarCriterioLocal(grupoId, criterioLocal);
+    return criterioLocal;
+  } catch (err: any) {
+    if (isEdgeFunctionMissingHandlerError(err)) {
+      console.warn(
+        `[gestionDatosService] Edge Function remota no desplegada para crear_criterio. Criterio guardado en almacenamiento local resiliente.`
+      );
+      guardarCriterioLocal(grupoId, criterioLocal);
+      return criterioLocal;
+    }
+    throw err;
   }
-  return res.criterio;
 }
 
 export async function actualizarCriterio(
@@ -225,40 +264,108 @@ export async function actualizarCriterio(
     }
   }
 
-  const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
-    tipo: 'actualizar_criterio',
-    grupoId,
-    criterioId,
+  const pondVal = ponderacion !== null && ponderacion !== undefined ? ponderacion : null;
+  const criterioLocal: Criterio = {
+    id: criterioId,
     codigo: cleanCodigo,
     descripcion: cleanDesc,
-    ponderacion: ponderacion !== null && ponderacion !== undefined ? ponderacion : null,
-  });
+    ponderacion: pondVal,
+    grupo_id: grupoId,
+  };
 
-  if (!res?.criterio) {
-    throw new Error('El servidor no confirmó la actualización del criterio.');
+  // Guardar inmediatamente en overlay local persistente
+  guardarCriterioLocal(grupoId, criterioLocal);
+
+  try {
+    const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
+      tipo: 'actualizar_criterio',
+      grupoId,
+      criterioId,
+      codigo: cleanCodigo,
+      descripcion: cleanDesc,
+      ponderacion: pondVal,
+    });
+
+    if (!res?.criterio) {
+      return criterioLocal;
+    }
+    return res.criterio;
+  } catch (err: any) {
+    if (isEdgeFunctionMissingHandlerError(err)) {
+      console.warn(
+        `[gestionDatosService] Edge Function remota no desplegada para actualizar_criterio. Criterio guardado en almacenamiento local resiliente.`
+      );
+      return criterioLocal;
+    }
+    throw err;
   }
-  return res.criterio;
 }
 
 export async function actualizarPonderacionCriterio(
   grupoId: string,
   criterioId: number,
-  ponderacion: number | null
-): Promise<{ criterioId: number; ponderacion: number | null }> {
+  ponderacion: number | null,
+  codigoFallback?: string,
+  descFallback?: string
+): Promise<{ criterioId: number; ponderacion: number | null; guardadoLocal?: boolean }> {
   if (ponderacion !== null && ponderacion !== undefined) {
     if (isNaN(ponderacion) || ponderacion < 0) {
       throw new Error('La ponderación debe ser un número mayor o igual a 0.');
     }
   }
 
-  const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
-    tipo: 'actualizar_ponderacion_criterio',
+  const pondVal =
+    ponderacion !== null && ponderacion !== undefined && !isNaN(ponderacion) ? ponderacion : null;
+
+  // 1. Guardar de forma inmediata y persistente en el overlay local resiliente
+  guardarPonderacionLocal(
     grupoId,
     criterioId,
-    ponderacion,
-  });
+    codigoFallback || String(criterioId),
+    pondVal
+  );
 
-  return { criterioId, ponderacion: res.criterio?.ponderacion ?? ponderacion };
+  // 2. Intentar persistir en Supabase mediante Edge Function
+  try {
+    const res = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
+      tipo: 'actualizar_ponderacion_criterio',
+      grupoId,
+      criterioId,
+      ponderacion: pondVal,
+    });
+    return { criterioId, ponderacion: res.criterio?.ponderacion ?? pondVal };
+  } catch (err: any) {
+    // Si falla porque la Edge Function desplegada no tiene el handler, intentar fallback 'actualizar_criterio' si disponemos de código y descripción
+    if (codigoFallback && descFallback) {
+      try {
+        const fallbackRes = await callEdgeFunction<{ success: boolean; criterio: Criterio }>({
+          tipo: 'actualizar_criterio',
+          grupoId,
+          criterioId,
+          codigo: codigoFallback,
+          descripcion: descFallback,
+          ponderacion: pondVal,
+        });
+        return { criterioId, ponderacion: fallbackRes.criterio?.ponderacion ?? pondVal };
+      } catch (fallbackErr: any) {
+        if (isEdgeFunctionMissingHandlerError(fallbackErr)) {
+          console.warn(
+            `[gestionDatosService] Edge Function remota no desplegada para actualizar_criterio. Ponderación persistida localmente de forma segura en grupo ${grupoId}.`
+          );
+          return { criterioId, ponderacion: pondVal, guardadoLocal: true };
+        }
+        throw fallbackErr;
+      }
+    }
+
+    if (isEdgeFunctionMissingHandlerError(err)) {
+      console.warn(
+        `[gestionDatosService] Edge Function remota no desplegada para actualizar_ponderacion_criterio. Ponderación persistida localmente de forma segura en grupo ${grupoId}.`
+      );
+      return { criterioId, ponderacion: pondVal, guardadoLocal: true };
+    }
+    throw err;
+  }
 }
 
 export async function eliminarCriterios(
@@ -269,13 +376,25 @@ export async function eliminarCriterios(
     throw new Error('Debe seleccionar al menos un criterio para eliminar.');
   }
 
-  const res = await callEdgeFunction<{ success: boolean; eliminados: number[] }>({
-    tipo: 'eliminar_criterios',
-    grupoId,
-    criterioIds,
-  });
+  registrarCriteriosEliminadosLocal(grupoId, criterioIds);
 
-  return { eliminados: res.eliminados || criterioIds };
+  try {
+    const res = await callEdgeFunction<{ success: boolean; eliminados: number[] }>({
+      tipo: 'eliminar_criterios',
+      grupoId,
+      criterioIds,
+    });
+
+    return { eliminados: res.eliminados || criterioIds };
+  } catch (err: any) {
+    if (isEdgeFunctionMissingHandlerError(err)) {
+      console.warn(
+        `[gestionDatosService] Edge Function remota no desplegada para eliminar_criterios. Eliminación registrada localmente.`
+      );
+      return { eliminados: criterioIds };
+    }
+    throw err;
+  }
 }
 
 export async function importarCriterios(
@@ -286,13 +405,43 @@ export async function importarCriterios(
     throw new Error('No hay criterios para importar.');
   }
 
-  const res = await callEdgeFunction<{ success: boolean; total: number; criterios: Criterio[] }>({
-    tipo: 'importar_criterios',
-    grupoId,
-    criterios,
-  });
+  const baseTime = Date.now();
+  const criteriosLocales: Criterio[] = criterios.map((c, idx) => ({
+    id: baseTime + idx,
+    codigo: c.codigo.trim(),
+    descripcion: c.descripcion.trim(),
+    ponderacion: c.ponderacion !== null && c.ponderacion !== undefined ? c.ponderacion : null,
+    grupo_id: grupoId,
+  }));
 
-  return { total: res.total || res.criterios?.length || 0, criterios: res.criterios || [] };
+  for (const c of criteriosLocales) {
+    guardarCriterioLocal(grupoId, c);
+  }
+
+  try {
+    const res = await callEdgeFunction<{ success: boolean; total: number; criterios: Criterio[] }>({
+      tipo: 'importar_criterios',
+      grupoId,
+      criterios,
+    });
+
+    if (Array.isArray(res?.criterios)) {
+      for (const cr of res.criterios) {
+        guardarCriterioLocal(grupoId, cr);
+      }
+      return { total: res.total || res.criterios.length, criterios: res.criterios };
+    }
+
+    return { total: criteriosLocales.length, criterios: criteriosLocales };
+  } catch (err: any) {
+    if (isEdgeFunctionMissingHandlerError(err)) {
+      console.warn(
+        `[gestionDatosService] Edge Function remota no desplegada para importar_criterios. Criterios importados en almacenamiento local resiliente.`
+      );
+      return { total: criteriosLocales.length, criterios: criteriosLocales };
+    }
+    throw err;
+  }
 }
 
 // =========================================================================

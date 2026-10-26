@@ -1,9 +1,4 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
   X,
   Upload,
@@ -16,6 +11,7 @@ import {
   Trash2,
   Edit2,
   Check,
+  Link2,
 } from 'lucide-react';
 import { Criterio } from '../../../types';
 import {
@@ -23,7 +19,14 @@ import {
   parseCriteriosFromDocx,
   parseCriteriosFromXlsx,
   importarCriterios,
+  actualizarCriterio,
 } from '../../../services/gestionDatosService';
+import {
+  obtenerGruposVinculadosCon,
+  replicarCriterioEnGruposVinculados,
+} from '../../../services/vinculacionCriteriosService';
+import { useCuaderno } from '../../../context/CuadernoContext';
+import { useAuth } from '../../../context/AuthContext';
 
 interface ImportarCriteriosModalProps {
   grupoId: string;
@@ -40,11 +43,28 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
   onClose,
   onSuccess,
 }) => {
+  const { cursoTheme, grupos } = useCuaderno();
+  const { user } = useAuth();
+
+  // Grupos vinculados
+  const gruposVinculadosIds = useMemo(
+    () => (grupoId ? obtenerGruposVinculadosCon(grupoId, user?.uid) : []),
+    [grupoId, user?.uid]
+  );
+  const gruposVinculados = useMemo(
+    () => grupos.filter((g) => gruposVinculadosIds.includes(g.id)),
+    [grupos, gruposVinculadosIds]
+  );
+
   const [file, setFile] = useState<File | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Opciones de importación
+  const [actualizarExistentes, setActualizarExistentes] = useState<boolean>(true);
+  const [replicarEnVinculados, setReplicarEnVinculados] = useState<boolean>(true);
 
   // Filas en la vista previa editable
   const [filas, setFilas] = useState<FilaImportacionCriterio[]>([]);
@@ -79,6 +99,14 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
         parseadas = await parseCriteriosFromDocx(selected, criteriosExistentes);
       } else {
         throw new Error('Formato no compatible. Por favor, selecciona un documento Word (.docx) o Excel (.xlsx).');
+      }
+
+      // Si actualizarExistentes está activo, pre-seleccionar los duplicados válidos para que se actualicen
+      if (actualizarExistentes) {
+        parseadas = parseadas.map((f) => ({
+          ...f,
+          seleccionado: !f.incompleto,
+        }));
       }
 
       setFilas(parseadas);
@@ -159,7 +187,7 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
             motivoDuplicado: esDuplicado ? 'Este código ya existe en el curso' : undefined,
             incompleto,
             motivoIncompleto: incompleto ? 'Código o descripción incompleta' : undefined,
-            seleccionado: !esDuplicado && !incompleto,
+            seleccionado: actualizarExistentes ? !incompleto : (!esDuplicado && !incompleto),
           };
         }
         return f;
@@ -179,14 +207,70 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
     setSubmitError(null);
 
     try {
-      const payload = filasParaImportar.map((f) => ({
-        codigo: f.codigo.trim(),
-        descripcion: f.descripcion.trim(),
-        ponderacion: f.ponderacion,
-      }));
+      const mapaExistentes = new Map<string, Criterio>();
+      criteriosExistentes.forEach((c) => {
+        if (c.codigo) {
+          mapaExistentes.set(c.codigo.trim().toLowerCase(), c);
+        }
+      });
 
-      const res = await importarCriterios(grupoId, payload);
-      onSuccess(res.total);
+      const paraActualizar: Array<{ criterioId: number; codigo: string; descripcion: string; ponderacion: number | null }> = [];
+      const paraInsertar: Array<{ codigo: string; descripcion: string; ponderacion: number | null }> = [];
+
+      for (const f of filasParaImportar) {
+        const codLower = f.codigo.trim().toLowerCase();
+        const exist = mapaExistentes.get(codLower);
+        if (exist && actualizarExistentes) {
+          paraActualizar.push({
+            criterioId: exist.id,
+            codigo: f.codigo.trim(),
+            descripcion: f.descripcion.trim(),
+            ponderacion: f.ponderacion ?? null,
+          });
+        } else if (!exist) {
+          paraInsertar.push({
+            codigo: f.codigo.trim(),
+            descripcion: f.descripcion.trim(),
+            ponderacion: f.ponderacion ?? null,
+          });
+        }
+      }
+
+      let countActualizados = 0;
+      for (const act of paraActualizar) {
+        await actualizarCriterio(
+          grupoId,
+          act.criterioId,
+          act.codigo,
+          act.descripcion,
+          act.ponderacion
+        );
+        countActualizados++;
+      }
+
+      let countInsertados = 0;
+      if (paraInsertar.length > 0) {
+        const res = await importarCriterios(grupoId, paraInsertar);
+        countInsertados = res.total;
+      }
+
+      // Replicar en cursos vinculados si está activo
+      if (replicarEnVinculados && gruposVinculados.length > 0) {
+        for (const fila of filasParaImportar) {
+          try {
+            await replicarCriterioEnGruposVinculados(
+              fila.codigo.trim(),
+              fila.descripcion.trim(),
+              fila.ponderacion ?? null,
+              gruposVinculados
+            );
+          } catch (vErr) {
+            console.warn('[ImportarCriteriosModal] Error replicando en cursos vinculados:', vErr);
+          }
+        }
+      }
+
+      onSuccess(countActualizados + countInsertados);
       onClose();
     } catch (err: any) {
       console.error('[ImportarCriteriosModal] Error al persistir importación:', err);
@@ -199,6 +283,9 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+        {/* Borde superior dinámico según el color del curso */}
+        <div className="h-1.5 w-full shrink-0" style={{ backgroundColor: cursoTheme.primary }} />
+
         {/* Cabecera */}
         <div className="p-4 sm:p-5 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
           <div className="flex items-center gap-3">
@@ -352,6 +439,47 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
                 </div>
               </div>
 
+              {/* Opciones de actualización y replicación */}
+              <div className="bg-indigo-50/70 p-3 rounded-xl border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <label className="flex items-start sm:items-center gap-2 text-indigo-950 font-bold cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={actualizarExistentes}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setActualizarExistentes(checked);
+                      setFilas((prev) =>
+                        prev.map((f) => {
+                          if (f.esDuplicado && !f.incompleto) {
+                            return { ...f, seleccionado: checked };
+                          }
+                          return f;
+                        })
+                      );
+                    }}
+                    className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer w-4 h-4 mt-0.5 sm:mt-0"
+                  />
+                  <span>
+                    Actualizar ponderación y descripción si el código ya existe en el curso
+                  </span>
+                </label>
+
+                {gruposVinculados.length > 0 && (
+                  <label className="flex items-center gap-2 text-indigo-950 font-bold cursor-pointer select-none shrink-0 bg-white/90 px-2.5 py-1.5 rounded-lg border border-indigo-200 shadow-2xs">
+                    <input
+                      type="checkbox"
+                      checked={replicarEnVinculados}
+                      onChange={(e) => setReplicarEnVinculados(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer w-3.5 h-3.5"
+                    />
+                    <span className="flex items-center gap-1 text-[11px]">
+                      <Link2 className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Replicar en vinculados ({gruposVinculados.map((g) => g.nombre).join(', ')})</span>
+                    </span>
+                  </label>
+                )}
+              </div>
+
               {/* Controles de selección por lotes y cambio de archivo */}
               <div className="flex items-center justify-between text-xs px-1">
                 <button
@@ -473,12 +601,21 @@ export const ImportarCriteriosModal: React.FC<ImportarCriteriosModalProps> = ({
                             </td>
                             <td className="p-2.5">
                               {fila.esDuplicado ? (
-                                <span
-                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded"
-                                  title={fila.motivoDuplicado}
-                                >
-                                  <AlertTriangle className="w-3 h-3" /> Duplicado
-                                </span>
+                                actualizarExistentes ? (
+                                  <span
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded"
+                                    title="Ya existe en el curso. Se actualizarán su ponderación y descripción con los datos del archivo."
+                                  >
+                                    <Check className="w-3 h-3 text-indigo-600" /> Actualizará
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded"
+                                    title={fila.motivoDuplicado}
+                                  >
+                                    <AlertTriangle className="w-3 h-3" /> Duplicado
+                                  </span>
+                                )
                               ) : fila.incompleto ? (
                                 <span
                                   className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 bg-rose-100 px-2 py-0.5 rounded"

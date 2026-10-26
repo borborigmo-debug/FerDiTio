@@ -72,6 +72,18 @@ export const GestionAlumnos: React.FC = () => {
     setErrorOperacion(null);
   };
 
+  // Selección automática de todo el contenido al recibir foco o clic para permitir sobreescribir sin borrar
+  const handleAutoSelect = (
+    e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement> | React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const target = e.currentTarget;
+    setTimeout(() => {
+      if (target && typeof target.select === 'function') {
+        target.select();
+      }
+    }, 0);
+  };
+
   const alumnosFiltrados = useMemo(() => {
     if (!busqueda.trim()) return alumnos;
     const q = busqueda.toLowerCase().trim();
@@ -249,6 +261,8 @@ export const GestionAlumnos: React.FC = () => {
               type="text"
               value={nuevoNombre}
               onChange={(e) => setNuevoNombre(e.target.value)}
+              onFocus={handleAutoSelect}
+              onClick={handleAutoSelect}
               placeholder="Apellidos, Nombre (ej: García López, Laura)"
               disabled={isCreando}
               className="flex-1 px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900"
@@ -258,6 +272,8 @@ export const GestionAlumnos: React.FC = () => {
               min="1"
               value={nuevoOrden}
               onChange={(e) => setNuevoOrden(e.target.value)}
+              onFocus={handleAutoSelect}
+              onClick={handleAutoSelect}
               placeholder="N.º (opc.)"
               disabled={isCreando}
               className="w-20 px-2 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900 text-center"
@@ -403,6 +419,8 @@ export const GestionAlumnos: React.FC = () => {
                               min="1"
                               value={ordenEditando}
                               onChange={(e) => setOrdenEditando(e.target.value)}
+                              onFocus={handleAutoSelect}
+                              onClick={handleAutoSelect}
                               className="w-12 px-1 py-0.5 text-xs text-center border border-indigo-400 rounded focus:outline-none"
                             />
                           ) : (
@@ -415,6 +433,14 @@ export const GestionAlumnos: React.FC = () => {
                               type="text"
                               value={nombreEditando}
                               onChange={(e) => setNombreEditando(e.target.value)}
+                              onFocus={handleAutoSelect}
+                              onClick={handleAutoSelect}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleGuardarEdicion(alumno.id);
+                                }
+                              }}
                               className="w-full max-w-md px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                             />
                           ) : (

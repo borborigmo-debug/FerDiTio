@@ -1,0 +1,40 @@
+<svg viewBox="0 0 160 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Pizarra de fondo con marco de madera -->
+  <rect x="25" y="10" width="115" height="75" rx="4" fill="#8d5b32" stroke="#684120" stroke-width="2" />
+  <rect x="30" y="15" width="105" height="65" rx="2" fill="#2d3748" />
+  <text x="110" y="32" fill="#e2e8f0" opacity="0.6" font-size="13" font-family="ui-serif, Georgia, serif" font-style="italic">abc</text>
+  <rect x="105" y="74" width="14" height="3" rx="1.5" fill="#ffffff" opacity="0.8" />
+
+  <!-- Libros a la izquierda -->
+  <rect x="5" y="65" width="42" height="11" rx="2" fill="#6b21a8" />
+  <rect x="10" y="67" width="34" height="7" rx="1" fill="#f8fafc" />
+  <rect x="7" y="54" width="40" height="11" rx="2" fill="#f59e0b" />
+  <rect x="11" y="56" width="33" height="7" rx="1" fill="#f8fafc" />
+  <rect x="11" y="43" width="38" height="11" rx="2" fill="#dc2626" />
+  <rect x="14" y="45" width="32" height="7" rx="1" fill="#f8fafc" />
+
+  <!-- Portalapices a la derecha -->
+  <path d="M125 54 L142 54 L138 88 L129 88 Z" fill="#6b21a8" />
+  <polygon points="132,32 134,26 136,32 136,54 132,54" fill="#f59e0b" />
+  <polygon points="134,26 133,29 135,29" fill="#292524" />
+  <polygon points="137,30 139,27 141,30 140,54 137,54" fill="#dc2626" />
+
+  <!-- Letras F D T -->
+  <g filter="drop-shadow(0px 3px 2px rgba(0,0,0,0.25))">
+    <text x="24" y="76" font-family="Arial Black, Impact, sans-serif" font-size="54" font-weight="900" font-style="italic" fill="#dc2626" stroke="#ffffff" stroke-width="3" stroke-linejoin="round">F</text>
+    <text x="52" y="76" font-family="Arial Black, Impact, sans-serif" font-size="54" font-weight="900" font-style="italic" fill="#f59e0b" stroke="#ffffff" stroke-width="3" stroke-linejoin="round">D</text>
+    <text x="89" y="76" font-family="Arial Black, Impact, sans-serif" font-size="54" font-weight="900" font-style="italic" fill="#6b21a8" stroke="#ffffff" stroke-width="3" stroke-linejoin="round">T</text>
+  </g>
+
+  <!-- FernanDiTio text -->
+  <g transform="translate(14, 104)">
+    <text x="0" y="0" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="18" font-weight="900" font-style="italic">
+      <tspan fill="#dc2626">Fernan</tspan>
+      <tspan fill="#f59e0b">Di</tspan>
+      <tspan fill="#6b21a8">Tio</tspan>
+    </text>
+    <rect x="0" y="4" width="56" height="2.5" rx="1" fill="#dc2626" />
+    <rect x="58" y="4" width="28" height="2.5" rx="1" fill="#f59e0b" />
+    <rect x="88" y="4" width="46" height="2.5" rx="1" fill="#6b21a8" />
+  </g>
+</svg>

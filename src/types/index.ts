@@ -69,6 +69,7 @@ export interface Seccion {
   color?: string | null;
   ponderacion?: number | null; // Inactivo para el cálculo de notas
   oculto?: boolean;
+  parent_id?: string | null;
 }
 
 export interface RubricaItem {

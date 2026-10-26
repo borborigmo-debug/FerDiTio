@@ -16,7 +16,9 @@ import {
   AlertCircle,
   Loader2,
   RefreshCw,
-  Tag,
+  FolderTree,
+  CornerDownRight,
+  Folder,
 } from 'lucide-react';
 import { useCuaderno } from '../../../context/CuadernoContext';
 import { Seccion } from '../../../types';
@@ -25,6 +27,12 @@ import {
   actualizarSeccion,
   eliminarSecciones,
 } from '../../../services/gestionDatosService';
+import {
+  organizarArbolSecciones,
+  setSeccionParent,
+  eliminarDeJerarquia,
+  ArbolSeccionItem,
+} from '../../../services/seccionesJerarquiaService';
 
 const COLORES_PREDEFINIDOS = [
   '#4f46e5', // indigo
@@ -49,9 +57,17 @@ export const GestionSecciones: React.FC = () => {
     return cuadernoData?.secciones || [];
   }, [cuadernoData]);
 
-  // Formulario nueva sección
+  // Árbol jerárquico organizado de secciones principales y sus subsecciones
+  const arbolSecciones: ArbolSeccionItem[] = useMemo(() => {
+    if (!selectedGrupoId) return [];
+    return organizarArbolSecciones(secciones, selectedGrupoId);
+  }, [secciones, selectedGrupoId]);
+
+  // Formulario de creación
   const [nuevoNombre, setNuevoNombre] = useState('');
   const [nuevoColor, setNuevoColor] = useState(COLORES_PREDEFINIDOS[0]);
+  const [esSubseccion, setEsSubseccion] = useState(false);
+  const [seccionPadreId, setSeccionPadreId] = useState<string>('');
   const [isCreando, setIsCreando] = useState(false);
 
   // Edición rápida en fila
@@ -74,6 +90,16 @@ export const GestionSecciones: React.FC = () => {
     setErrorOperacion(null);
   };
 
+  // Abrir formulario rápido para añadir subsección a una sección concreta
+  const handleAbrirCrearSubseccion = (padreId: string, colorPadre?: string | null) => {
+    setEsSubseccion(true);
+    setSeccionPadreId(padreId);
+    if (colorPadre) setNuevoColor(colorPadre);
+    setNuevoNombre('');
+    // Scroll suave hacia el formulario
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleCrear = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedGrupoId) {
@@ -83,7 +109,12 @@ export const GestionSecciones: React.FC = () => {
 
     const clean = nuevoNombre.trim();
     if (!clean || clean.length < 2) {
-      setErrorOperacion('El nombre de la sección debe tener al menos 2 caracteres.');
+      setErrorOperacion('El nombre debe tener al menos 2 caracteres.');
+      return;
+    }
+
+    if (esSubseccion && !seccionPadreId) {
+      setErrorOperacion('Debes seleccionar la sección principal a la que pertenecerá esta subsección.');
       return;
     }
 
@@ -92,12 +123,24 @@ export const GestionSecciones: React.FC = () => {
 
     try {
       const nueva = await crearSeccion(selectedGrupoId, clean, nuevoColor);
+
+      // Si es subsección, registrar el vínculo con su padre
+      if (esSubseccion && seccionPadreId) {
+        setSeccionParent(selectedGrupoId, nueva.id, seccionPadreId);
+      }
+
       setNuevoNombre('');
-      setMensajeExito(`Sección «${nueva.nombre}» creada correctamente.`);
+      setEsSubseccion(false);
+      setSeccionPadreId('');
+      setMensajeExito(
+        esSubseccion
+          ? `Subsección «${nueva.nombre}» añadida correctamente.`
+          : `Sección «${nueva.nombre}» creada correctamente.`
+      );
       await refreshCuaderno(true);
     } catch (err: any) {
-      console.error('[GestionSecciones] Error al crear sección:', err);
-      setErrorOperacion(err?.message || 'Error al guardar la sección en Supabase.');
+      console.error('[GestionSecciones] Error al crear sección/subsección:', err);
+      setErrorOperacion(err?.message || 'Error al guardar en Supabase.');
     } finally {
       setIsCreando(false);
     }
@@ -129,7 +172,7 @@ export const GestionSecciones: React.FC = () => {
         colorEditando
       );
       setEditandoId(null);
-      setMensajeExito(`Sección «${actualizada.nombre}» actualizada correctamente.`);
+      setMensajeExito(`Elemento «${actualizada.nombre}» actualizado correctamente.`);
       await refreshCuaderno(true);
     } catch (err: any) {
       console.error('[GestionSecciones] Error al actualizar sección:', err);
@@ -161,14 +204,20 @@ export const GestionSecciones: React.FC = () => {
 
     try {
       const { eliminadas } = await eliminarSecciones(selectedGrupoId, selectedIds);
+
+      // Limpiar jerarquías
+      for (const id of eliminadas) {
+        eliminarDeJerarquia(selectedGrupoId, id);
+      }
+
       setShowConfirmModal(false);
       setSelectedIds([]);
       setMensajeExito(
-        `${eliminadas.length} ${eliminadas.length === 1 ? 'sección eliminada' : 'secciones eliminadas'} correctamente.`
+        `${eliminadas.length} ${eliminadas.length === 1 ? 'sección/subsección eliminada' : 'secciones/subsecciones eliminadas'} correctamente.`
       );
       await refreshCuaderno(true);
     } catch (err: any) {
-      console.error('[GestionSecciones] Error al eliminar secciones:', err);
+      console.error('[GestionSecciones] Error al eliminar:', err);
       setErrorOperacion(err?.message || 'No se pudieron eliminar las secciones.');
       setShowConfirmModal(false);
     } finally {
@@ -182,11 +231,14 @@ export const GestionSecciones: React.FC = () => {
         <Layers className="w-8 h-8 text-slate-300 mx-auto" />
         <p className="text-xs font-semibold text-slate-600">Ningún curso seleccionado.</p>
         <p className="text-[11px] text-slate-400">
-          Selecciona un curso para gestionar sus secciones o bloques temáticos.
+          Selecciona un curso para gestionar sus secciones y subsecciones.
         </p>
       </div>
     );
   }
+
+  // Lista de secciones principales para el selector de padre
+  const seccionesPrincipalesDisponibles = arbolSecciones.map((item) => item.seccion);
 
   return (
     <div className="space-y-5">
@@ -226,57 +278,110 @@ export const GestionSecciones: React.FC = () => {
         </div>
       )}
 
-      {/* Formulario para añadir nueva sección */}
+      {/* Formulario para añadir nueva sección o subsección */}
       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
-        <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-          <Plus className="w-4 h-4 text-indigo-600" />
-          Añadir Nueva Sección al Curso
-        </h4>
-        <form onSubmit={handleCrear} className="flex flex-col sm:flex-row items-center gap-2.5">
-          <div className="flex-1 w-full">
-            <input
-              type="text"
-              value={nuevoNombre}
-              onChange={(e) => setNuevoNombre(e.target.value)}
-              placeholder="Ej: Trabajos en clase, Proyectos, Pruebas escritas..."
-              disabled={isCreando}
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900"
-            />
-          </div>
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+            <Plus className="w-4 h-4 text-indigo-600" />
+            <span>{esSubseccion ? 'Añadir Nueva Subsección' : 'Añadir Nueva Sección'}</span>
+          </h4>
 
-          {/* Selector de color */}
-          <div className="flex items-center gap-1.5 bg-white p-1 rounded-lg border border-slate-300">
-            {COLORES_PREDEFINIDOS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setNuevoColor(c)}
-                className={`w-5 h-5 rounded-full transition-transform cursor-pointer ${
-                  nuevoColor === c ? 'scale-125 ring-2 ring-indigo-500 ring-offset-1' : 'hover:scale-110'
-                }`}
-                style={{ backgroundColor: c }}
-                title={c}
+          {/* Selector de tipo (Sección principal vs Subsección) */}
+          <div className="flex items-center gap-2">
+            <label className="text-[11px] font-semibold text-slate-600 flex items-center gap-1 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={esSubseccion}
+                onChange={(e) => {
+                  setEsSubseccion(e.target.checked);
+                  if (e.target.checked && !seccionPadreId && seccionesPrincipalesDisponibles.length > 0) {
+                    setSeccionPadreId(seccionesPrincipalesDisponibles[0].id);
+                  }
+                }}
+                disabled={seccionesPrincipalesDisponibles.length === 0}
+                className="w-3.5 h-3.5 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
               />
-            ))}
+              <span>Crear como subsección de otra</span>
+            </label>
           </div>
+        </div>
 
-          <button
-            type="submit"
-            disabled={isCreando || !nuevoNombre.trim()}
-            className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
-          >
-            {isCreando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-            <span>Añadir Sección</span>
-          </button>
+        <form onSubmit={handleCrear} className="space-y-3">
+          <div className="flex flex-col sm:flex-row items-center gap-2.5">
+            {/* Si es subsección, mostrar selector de sección padre */}
+            {esSubseccion && (
+              <div className="w-full sm:w-64">
+                <select
+                  value={seccionPadreId}
+                  onChange={(e) => {
+                    setSeccionPadreId(e.target.value);
+                    const padre = secciones.find((s) => s.id === e.target.value);
+                    if (padre?.color) setNuevoColor(padre.color);
+                  }}
+                  className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-slate-900 cursor-pointer"
+                >
+                  <option value="">-- Elige sección padre --</option>
+                  {seccionesPrincipalesDisponibles.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      📁 {p.nombre}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="flex-1 w-full">
+              <input
+                type="text"
+                value={nuevoNombre}
+                onChange={(e) => setNuevoNombre(e.target.value)}
+                placeholder={
+                  esSubseccion
+                    ? 'Nombre de la subsección (ej: Ortografía, Figuras retóricas, Sintaxis...)'
+                    : 'Nombre de la sección (ej: Expresión escrita, Comunicación oral, Literatura...)'
+                }
+                disabled={isCreando}
+                className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900"
+              />
+            </div>
+
+            {/* Selector de color */}
+            <div className="flex items-center gap-1.5 bg-white p-1 rounded-lg border border-slate-300">
+              {COLORES_PREDEFINIDOS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setNuevoColor(c)}
+                  className={`w-5 h-5 rounded-full transition-transform cursor-pointer ${
+                    nuevoColor === c ? 'scale-125 ring-2 ring-indigo-500 ring-offset-1' : 'hover:scale-110'
+                  }`}
+                  style={{ backgroundColor: c }}
+                  title={c}
+                />
+              ))}
+            </div>
+
+            <button
+              type="submit"
+              disabled={isCreando || !nuevoNombre.trim()}
+              className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0"
+            >
+              {isCreando ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+              <span>{esSubseccion ? 'Añadir Subsección' : 'Añadir Sección'}</span>
+            </button>
+          </div>
         </form>
       </div>
 
-      {/* Lista de Secciones */}
+      {/* Lista Jerárquica de Secciones y Subsecciones */}
       <div className="space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-3">
-            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-              Secciones Registradas ({secciones.length})
+            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+              <FolderTree className="w-4 h-4 text-indigo-600" />
+              <span>
+                Estructura de Secciones ({secciones.length} total, {arbolSecciones.length} principales)
+              </span>
             </span>
             {isLoadingCuaderno && <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />}
           </div>
@@ -311,7 +416,7 @@ export const GestionSecciones: React.FC = () => {
             <Layers className="w-8 h-8 text-slate-300 mx-auto" />
             <p className="text-xs font-semibold text-slate-600">No hay secciones en este curso.</p>
             <p className="text-[11px] text-slate-400">
-              Las secciones permiten organizar actividades en bloques o instrumentos de evaluación.
+              Las secciones y subsecciones permiten organizar actividades en bloques temáticos.
             </p>
           </div>
         ) : (
@@ -328,114 +433,239 @@ export const GestionSecciones: React.FC = () => {
                     />
                   </th>
                   <th className="p-3 w-12 text-center">Color</th>
-                  <th className="p-3">Nombre de la Sección</th>
-                  <th className="p-3 w-28 text-right">Acción</th>
+                  <th className="p-3">Sección / Subsección</th>
+                  <th className="p-3 w-36 text-center">Tipo</th>
+                  <th className="p-3 w-40 text-right">Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {secciones.map((seccion) => {
-                  const isSelected = selectedIds.includes(seccion.id);
-                  const estaEditando = editandoId === seccion.id;
+                {arbolSecciones.map((item) => {
+                  const padre = item.seccion;
+                  const isPadreSelected = selectedIds.includes(padre.id);
+                  const estaEditandoPadre = editandoId === padre.id;
 
                   return (
-                    <tr
-                      key={seccion.id}
-                      className={`transition-colors ${
-                        isSelected ? 'bg-indigo-50/40' : 'hover:bg-slate-50/70'
-                      }`}
-                    >
-                      <td className="p-3 text-center">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleToggleSeleccion(seccion.id)}
-                          className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                        />
-                      </td>
-                      <td className="p-3 text-center">
-                        {estaEditando ? (
-                          <div className="flex items-center justify-center">
+                    <React.Fragment key={padre.id}>
+                      {/* Fila: Sección Principal */}
+                      <tr
+                        className={`transition-colors bg-white font-medium ${
+                          isPadreSelected ? 'bg-indigo-50/40' : 'hover:bg-slate-50/70'
+                        }`}
+                      >
+                        <td className="p-3 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isPadreSelected}
+                            onChange={() => handleToggleSeleccion(padre.id)}
+                            className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                        </td>
+                        <td className="p-3 text-center">
+                          {estaEditandoPadre ? (
                             <input
                               type="color"
                               value={colorEditando}
                               onChange={(e) => setColorEditando(e.target.value)}
                               className="w-6 h-6 rounded border-0 cursor-pointer"
                             />
-                          </div>
-                        ) : (
-                          <span
-                            className="inline-block w-4 h-4 rounded-full shadow-2xs"
-                            style={{ backgroundColor: seccion.color || '#6366f1' }}
-                          />
-                        )}
-                      </td>
-                      <td className="p-3 font-semibold text-slate-900">
-                        {estaEditando ? (
-                          <input
-                            type="text"
-                            value={nombreEditando}
-                            onChange={(e) => setNombreEditando(e.target.value)}
-                            className="w-full max-w-sm px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                          />
-                        ) : (
-                          <span className="flex items-center gap-2">
-                            <span>{seccion.nombre}</span>
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-3 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          {estaEditando ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleGuardarEdicion(seccion.id)}
-                                disabled={isGuardandoEdicion}
-                                className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-md cursor-pointer"
-                                title="Guardar cambios"
-                              >
-                                {isGuardandoEdicion ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                ) : (
-                                  <Check className="w-3.5 h-3.5" />
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setEditandoId(null)}
-                                disabled={isGuardandoEdicion}
-                                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
-                                title="Cancelar"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </>
                           ) : (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleIniciarEdicion(seccion)}
-                                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
-                                title="Editar sección"
-                              >
-                                <Edit2 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedIds([seccion.id]);
-                                  setShowConfirmModal(true);
-                                }}
-                                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
-                                title="Eliminar sección"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
+                            <span
+                              className="inline-block w-4 h-4 rounded-full shadow-2xs"
+                              style={{ backgroundColor: padre.color || '#6366f1' }}
+                            />
                           )}
-                        </div>
-                      </td>
-                    </tr>
+                        </td>
+                        <td className="p-3 font-bold text-slate-900">
+                          {estaEditandoPadre ? (
+                            <input
+                              type="text"
+                              value={nombreEditando}
+                              onChange={(e) => setNombreEditando(e.target.value)}
+                              className="w-full max-w-sm px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            />
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <Folder className="w-4 h-4 text-indigo-600 shrink-0" />
+                              <span>{padre.nombre}</span>
+                              {item.subsecciones.length > 0 && (
+                                <span className="text-[10px] text-slate-400 font-normal">
+                                  ({item.subsecciones.length} {item.subsecciones.length === 1 ? 'subsección' : 'subsecciones'})
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-3 text-center">
+                          <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            Sección principal
+                          </span>
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            {estaEditandoPadre ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleGuardarEdicion(padre.id)}
+                                  disabled={isGuardandoEdicion}
+                                  className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-md cursor-pointer"
+                                  title="Guardar cambios"
+                                >
+                                  {isGuardandoEdicion ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditandoId(null)}
+                                  disabled={isGuardandoEdicion}
+                                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
+                                  title="Cancelar"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAbrirCrearSubseccion(padre.id, padre.color)}
+                                  className="px-2 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-md flex items-center gap-1 cursor-pointer"
+                                  title="Añadir una subsección dentro de esta sección"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Subsección</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleIniciarEdicion(padre)}
+                                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
+                                  title="Editar"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedIds([padre.id]);
+                                    setShowConfirmModal(true);
+                                  }}
+                                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
+                                  title="Eliminar"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+
+                      {/* Filas anidadas: Subsecciones */}
+                      {item.subsecciones.map((sub) => {
+                        const isSubSelected = selectedIds.includes(sub.id);
+                        const estaEditandoSub = editandoId === sub.id;
+
+                        return (
+                          <tr
+                            key={sub.id}
+                            className={`transition-colors bg-slate-50/50 ${
+                              isSubSelected ? 'bg-indigo-50/40' : 'hover:bg-indigo-50/20'
+                            }`}
+                          >
+                            <td className="p-3 text-center">
+                              <input
+                                type="checkbox"
+                                checked={isSubSelected}
+                                onChange={() => handleToggleSeleccion(sub.id)}
+                                className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                              />
+                            </td>
+                            <td className="p-3 text-center">
+                              {estaEditandoSub ? (
+                                <input
+                                  type="color"
+                                  value={colorEditando}
+                                  onChange={(e) => setColorEditando(e.target.value)}
+                                  className="w-5 h-5 rounded border-0 cursor-pointer"
+                                />
+                              ) : (
+                                <span
+                                  className="inline-block w-3.5 h-3.5 rounded-full shadow-2xs opacity-80"
+                                  style={{ backgroundColor: sub.color || padre.color || '#6366f1' }}
+                                />
+                              )}
+                            </td>
+                            <td className="p-3 pl-8 text-slate-800">
+                              {estaEditandoSub ? (
+                                <input
+                                  type="text"
+                                  value={nombreEditando}
+                                  onChange={(e) => setNombreEditando(e.target.value)}
+                                  className="w-full max-w-sm px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none"
+                                />
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <CornerDownRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                  <span className="font-semibold">{sub.nombre}</span>
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3 text-center">
+                              <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
+                                Subsección
+                              </span>
+                            </td>
+                            <td className="p-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                {estaEditandoSub ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleGuardarEdicion(sub.id)}
+                                      disabled={isGuardandoEdicion}
+                                      className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-md cursor-pointer"
+                                      title="Guardar"
+                                    >
+                                      {isGuardandoEdicion ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditandoId(null)}
+                                      disabled={isGuardandoEdicion}
+                                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
+                                      title="Cancelar"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleIniciarEdicion(sub)}
+                                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md cursor-pointer"
+                                      title="Editar"
+                                    >
+                                      <Edit2 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedIds([sub.id]);
+                                        setShowConfirmModal(true);
+                                      }}
+                                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
+                                      title="Eliminar"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
@@ -444,7 +674,7 @@ export const GestionSecciones: React.FC = () => {
         )}
       </div>
 
-      {/* Modal de confirmación de eliminación con comprobación de dependencias */}
+      {/* Modal de confirmación de eliminación */}
       {showConfirmModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 border border-slate-200 space-y-4 animate-in fade-in zoom-in-95">
@@ -454,21 +684,12 @@ export const GestionSecciones: React.FC = () => {
               </div>
               <div className="space-y-1">
                 <h4 className="text-sm font-bold text-slate-900">
-                  ¿Eliminar {selectedIds.length} {selectedIds.length === 1 ? 'sección' : 'secciones'}?
+                  ¿Eliminar {selectedIds.length} {selectedIds.length === 1 ? 'sección/subsección' : 'secciones/subsecciones'}?
                 </h4>
                 <p className="text-xs text-slate-600">
-                  El servidor comprobará si las secciones seleccionadas contienen actividades asignadas. Si existen actividades vinculadas, la eliminación será bloqueada para evitar desvincular tareas involuntariamente.
+                  El servidor comprobará si contienen actividades asignadas. Si existen actividades vinculadas, la eliminación será bloqueada para evitar desvincular tareas involuntariamente.
                 </p>
               </div>
-            </div>
-
-            <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-xs text-amber-800">
-              <p className="font-bold flex items-center gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" /> Operación segura requerida:
-              </p>
-              <p className="text-[11px] mt-0.5">
-                No se eliminarán ni desvincularán automáticamente actividades asociadas.
-              </p>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -489,7 +710,7 @@ export const GestionSecciones: React.FC = () => {
                 {isDeleting ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Verificando y eliminando...</span>
+                    <span>Eliminando...</span>
                   </>
                 ) : (
                   <>

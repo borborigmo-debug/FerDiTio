@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useAuth } from './AuthContext';
 import { GrupoDocente, fetchGruposDocente, fetchCuadernoGrupo, eliminarActividadesLote } from '../services/gruposService';
 import { eliminarRubricasLote } from '../services/rubricasService';
-import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica, ActividadDetalle } from '../types';
+import { CuadernoGrupoData, Calificacion, CalificacionApartado, Rubrica, ActividadDetalle, Criterio } from '../types';
+import {
+  getHorarioCalendario,
+  obtenerEvaluacionActual,
+  obtenerSesionActual,
+} from '../services/horarioCalendarioService';
+import { getCursoColorTheme, CursoColorTheme } from '../utils/cursoColorUtils';
 
 export type EvaluacionPeriodo = '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
 export type NavTab = 'actividades' | 'rubricas' | 'filtro' | 'resultados' | 'configuracion';
@@ -46,6 +52,8 @@ interface CuadernoContextValue {
   updateCalificacionesApartados: (apartados: CalificacionApartado[]) => void;
   updateRubrica: (rubrica: Rubrica) => void;
   addRubricaYActividad: (rubrica: Rubrica, actividad: ActividadDetalle) => void;
+  updateCriterioPonderacion: (criterioId: number, ponderacion: number | null) => void;
+  updateCriteriosLote: (criterios: Criterio[]) => void;
   eliminarActividades: (actividadIds: string[]) => Promise<{ success: boolean; eliminadas: string[] }>;
   eliminarRubricas: (rubricaIds: string[]) => Promise<{ success: boolean; eliminadas: string[]; actividadesEliminadas: string[] }>;
 
@@ -56,6 +64,9 @@ interface CuadernoContextValue {
   // Estado de conexión
   connectionInfo: ConnectionInfo;
   checkServerConnection: () => Promise<void>;
+
+  // Tema visual dependiente del curso activo
+  cursoTheme: CursoColorTheme;
 }
 
 const CuadernoContext = createContext<CuadernoContextValue | null>(null);
@@ -200,8 +211,29 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const listado = resp.groups || [];
       setGrupos(listado);
 
-      // Si hay grupos y ninguno seleccionado, seleccionar automáticamente el primero
+      // Determinar selección automática según Horario y Calendario lectivo si está configurado
+      let autoGrupoId: string | null = null;
+      try {
+        const configHorario = getHorarioCalendario(user.uid);
+        if (configHorario.aperturaAutomaticaHabilitada) {
+          const evalActual = obtenerEvaluacionActual(configHorario.calendario);
+          if (evalActual) {
+            setSelectedEvaluacion(evalActual as EvaluacionPeriodo);
+          }
+          const sesionActual = obtenerSesionActual(configHorario, listado);
+          if (sesionActual && sesionActual.grupoId && listado.some((g) => g.id === sesionActual.grupoId)) {
+            autoGrupoId = sesionActual.grupoId;
+          }
+        }
+      } catch (e) {
+        console.warn('[CuadernoContext] Error evaluando apertura automática por horario:', e);
+      }
+
+      // Si coincide con la sesión lectiva activa, priorizar dicho grupo; de lo contrario seleccionar el primero
       setSelectedGrupoId((prevId) => {
+        if (autoGrupoId) {
+          return autoGrupoId;
+        }
         if (!prevId && listado.length > 0) {
           return listado[0].id;
         }
@@ -285,8 +317,13 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       // 4. Actualizar estado y preparar nueva petición
+      // Si cambiamos de curso, limpiamos los datos previos para evitar mezclar información.
+      // Si es una recarga forzada del MISMO curso, conservamos los datos en memoria para no desmontar
+      // las tablas ni hacer perder el foco o los valores de los inputs al usuario.
+      if (grupoId !== selectedGrupoId) {
+        setCuadernoData(null);
+      }
       setSelectedGrupoId(grupoId);
-      setCuadernoData(null);
       setCuadernoError(null);
       setIsLoadingCuaderno(true);
 
@@ -426,6 +463,35 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     []
   );
 
+  const updateCriterioPonderacion = useCallback(
+    (criterioId: number, ponderacion: number | null) => {
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        const criteriosActualizados = (prev.criterios || []).map((c) =>
+          c.id === criterioId ? { ...c, ponderacion } : c
+        );
+        return {
+          ...prev,
+          criterios: criteriosActualizados,
+        };
+      });
+    },
+    []
+  );
+
+  const updateCriteriosLote = useCallback(
+    (nuevosCriterios: Criterio[]) => {
+      setCuadernoData((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          criterios: nuevosCriterios,
+        };
+      });
+    },
+    []
+  );
+
   const eliminarActividades = useCallback(
     async (actividadIds: string[]) => {
       if (!selectedGrupoId) {
@@ -510,6 +576,10 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const selectedGrupo = grupos.find((g) => g.id === selectedGrupoId) || null;
 
+  const cursoTheme = useMemo(() => {
+    return getCursoColorTheme(selectedGrupo?.nombre || null);
+  }, [selectedGrupo?.nombre]);
+
   return (
     <CuadernoContext.Provider
       value={{
@@ -535,6 +605,8 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateCalificacionesApartados,
         updateRubrica,
         addRubricaYActividad,
+        updateCriterioPonderacion,
+        updateCriteriosLote,
         eliminarActividades,
         eliminarRubricas,
 
@@ -543,6 +615,8 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         connectionInfo,
         checkServerConnection,
+
+        cursoTheme,
       }}
     >
       {children}
@@ -574,6 +648,8 @@ export function useCuaderno(): CuadernoContextValue {
       updateCalificacionesApartados: () => {},
       updateRubrica: () => {},
       addRubricaYActividad: () => {},
+      updateCriterioPonderacion: () => {},
+      updateCriteriosLote: () => {},
       eliminarActividades: async () => ({ success: false, eliminadas: [] }),
       eliminarRubricas: async () => ({ success: false, eliminadas: [], actividadesEliminadas: [] }),
       hasUnsavedChanges: false,
@@ -584,6 +660,7 @@ export function useCuaderno(): CuadernoContextValue {
         details: 'Inicia sesión con Google para conectar con el servidor.',
       },
       checkServerConnection: async () => {},
+      cursoTheme: getCursoColorTheme(null),
     };
   }
   return context;

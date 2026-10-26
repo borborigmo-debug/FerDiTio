@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useCuaderno, EvaluacionPeriodo, NavTab } from '../../context/CuadernoContext';
+import { getCursoColorTheme } from '../../utils/cursoColorUtils';
+import { FernanditioLogo } from '../common/FernanditioLogo';
 import {
   BookOpen,
   LogOut,
@@ -39,6 +41,14 @@ export const Header: React.FC = () => {
     hasUnsavedChanges,
     setHasUnsavedChanges,
   } = useCuaderno();
+
+  const selectedGrupo = useMemo(() => {
+    return grupos.find((g) => g.id === selectedGrupoId) || null;
+  }, [grupos, selectedGrupoId]);
+
+  const cursoTheme = useMemo(() => {
+    return getCursoColorTheme(selectedGrupoId, selectedGrupo?.nombre);
+  }, [selectedGrupoId, selectedGrupo]);
 
   /**
    * Solicita confirmación si existen calificaciones o modificaciones pendientes en la rúbrica
@@ -160,25 +170,23 @@ export const Header: React.FC = () => {
 
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+      {/* Borde superior de la pantalla: cambia según el curso seleccionado */}
+      <div
+        className="h-1.5 w-full transition-colors duration-300 shadow-2xs"
+        style={{ backgroundColor: cursoTheme.primary }}
+        title={selectedGrupo ? `Curso activo: ${selectedGrupo.nombre}` : 'Fernanditio'}
+      />
+
       {/* =========================================================================
           FILA 1: CABECERA GLOBAL
           (Logotipo, Selector de Curso, Selector de Evaluación, Conexión, Cerrar Sesión)
          ========================================================================= */}
       <div className="border-b border-slate-100 bg-white">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2">
-          {/* 1. Logotipo de Fernanditio (en móvil se oculta o compacta para priorizar espacio) */}
-          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white shadow-xs">
-              <BookOpen className="w-4 h-4" aria-hidden="true" />
-            </div>
-            <div className="hidden sm:block">
-              <span className="font-bold text-base text-slate-900 tracking-tight leading-none block">
-                Fernanditio
-              </span>
-              <span className="text-[10px] text-slate-500 font-medium leading-none block mt-0.5">
-                Evaluación por Criterios
-              </span>
-            </div>
+          {/* 1. Logotipo oficial de Fernanditio en la esquina superior (oculto en versión móvil para priorizar botones e información importante) */}
+          <div className="hidden sm:flex items-center gap-2.5 shrink-0 select-none">
+            <FernanditioLogo variant="badge" size="sm" className="h-7 w-auto drop-shadow-2xs" />
+            <FernanditioLogo variant="wordmark" className="text-base" />
           </div>
 
           {/* Si está autenticado, renderiza los controles de la Fila 1 */}

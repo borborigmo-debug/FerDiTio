@@ -24,6 +24,7 @@ import {
 } from '../../services/calificacionesService';
 import { asegurarYPersistirRubricaUuids } from '../../services/rubricasService';
 import { useCuaderno } from '../../context/CuadernoContext';
+import { getCursoColorTheme } from '../../utils/cursoColorUtils';
 import {
   User,
   X,
@@ -85,6 +86,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   initialActividadId,
 }) => {
   const { setHasUnsavedChanges, selectedGrupo, eliminarActividades: contextEliminarActividades } = useCuaderno();
+  const cursoTheme = useMemo(() => getCursoColorTheme(grupoId, selectedGrupo?.nombre), [grupoId, selectedGrupo]);
 
   // Estado local sincronizado de la rúbrica
   const [rubricaActiva, setRubricaActiva] = useState<Rubrica>(rubricaRaw);
@@ -616,6 +618,13 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
       className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-1 sm:p-4 overflow-hidden"
     >
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-5xl h-full sm:h-auto max-h-[96vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        {/* Borde superior del modal distintivo según el curso seleccionado */}
+        <div
+          className="h-2 w-full shrink-0 transition-colors shadow-xs"
+          style={{ backgroundColor: cursoTheme.primary }}
+          title={`Curso activo: ${selectedGrupo?.nombre || 'Actual'}`}
+        />
+
         {/* ========================================================
             CONTENEDOR DESPLAZABLE VERTICALMENTE
             Las filas 1 y 2 se ocultan al hacer scroll hacia abajo.

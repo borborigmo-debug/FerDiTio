@@ -9,15 +9,24 @@ import {
   Users,
   Award,
   Layers,
-  Database,
+  Calendar,
+  Scale,
 } from 'lucide-react';
 import { useCuaderno } from '../../../context/CuadernoContext';
 import { GestionCursos } from './GestionCursos';
 import { GestionAlumnos } from './GestionAlumnos';
 import { GestionCriterios } from './GestionCriterios';
 import { GestionSecciones } from './GestionSecciones';
+import { GestionHorarioCalendario } from './GestionHorarioCalendario';
+import { GestionInstrumentos } from './GestionInstrumentos';
 
-export type SubApartadoGestion = 'cursos' | 'alumnos' | 'criterios' | 'secciones';
+export type SubApartadoGestion =
+  | 'cursos'
+  | 'alumnos'
+  | 'criterios'
+  | 'secciones'
+  | 'horario_calendario'
+  | 'instrumentos';
 
 export const GestionDatosView: React.FC = () => {
   const { selectedGrupo } = useCuaderno();
@@ -28,38 +37,57 @@ export const GestionDatosView: React.FC = () => {
     label: string;
     icon: React.ComponentType<{ className?: string }>;
     description: string;
+    sublabel: string;
   }> = [
     {
       id: 'cursos',
       label: 'Cursos',
       icon: Folder,
       description: 'Gestión de grupos escolares y cursos docentes',
+      sublabel: 'Todos los cursos',
     },
     {
       id: 'alumnos',
       label: 'Alumnos',
       icon: Users,
       description: 'Expediente, altas, bajas e importación Word/Excel',
+      sublabel: selectedGrupo?.nombre || 'Selecciona curso',
     },
     {
       id: 'criterios',
       label: 'Criterios de evaluación',
       icon: Award,
       description: 'Criterios LOMLOE, ponderaciones e importación de programaciones',
+      sublabel: selectedGrupo?.nombre || 'Selecciona curso',
     },
     {
       id: 'secciones',
       label: 'Secciones',
       icon: Layers,
-      description: 'Bloques temáticos e instrumentos de evaluación del curso',
+      description: 'Bloques temáticos y subsecciones organizativas del curso',
+      sublabel: selectedGrupo?.nombre || 'Selecciona curso',
+    },
+    {
+      id: 'horario_calendario',
+      label: 'Horario/Calendario',
+      icon: Calendar,
+      description: 'Horario lectivo y fechas oficiales de evaluaciones',
+      sublabel: 'Apertura automática',
+    },
+    {
+      id: 'instrumentos',
+      label: 'Instrumentos de evaluación',
+      icon: Scale,
+      description: 'Instrumentos del docente y ponderaciones opcionales',
+      sublabel: 'Ponderación opcional',
     },
   ];
 
   return (
     <div className="space-y-6">
-      {/* Subnavegación de los 4 apartados */}
+      {/* Subnavegación de apartados en Configuración */}
       <div className="bg-white p-2 sm:p-2.5 rounded-xl border border-slate-200 shadow-2xs">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
           {apartados.map((item) => {
             const Icon = item.icon;
             const isActive = apartadoActivo === item.id;
@@ -90,9 +118,7 @@ export const GestionDatosView: React.FC = () => {
                       isActive ? 'text-indigo-100' : 'text-slate-400'
                     }`}
                   >
-                    {item.id === 'cursos'
-                      ? 'Todos los cursos'
-                      : selectedGrupo?.nombre || 'Selecciona curso'}
+                    {item.sublabel}
                   </span>
                 </div>
               </button>
@@ -107,6 +133,8 @@ export const GestionDatosView: React.FC = () => {
         {apartadoActivo === 'alumnos' && <GestionAlumnos />}
         {apartadoActivo === 'criterios' && <GestionCriterios />}
         {apartadoActivo === 'secciones' && <GestionSecciones />}
+        {apartadoActivo === 'horario_calendario' && <GestionHorarioCalendario />}
+        {apartadoActivo === 'instrumentos' && <GestionInstrumentos />}
       </div>
     </div>
   );

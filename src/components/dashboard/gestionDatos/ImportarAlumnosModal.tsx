@@ -25,6 +25,8 @@ import {
   importarAlumnos,
 } from '../../../services/gestionDatosService';
 
+import { useCuaderno } from '../../../context/CuadernoContext';
+
 interface ImportarAlumnosModalProps {
   grupoId: string;
   grupoNombre: string;
@@ -40,6 +42,7 @@ export const ImportarAlumnosModal: React.FC<ImportarAlumnosModalProps> = ({
   onClose,
   onSuccess,
 }) => {
+  const { cursoTheme } = useCuaderno();
   const [file, setFile] = useState<File | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -189,6 +192,9 @@ export const ImportarAlumnosModal: React.FC<ImportarAlumnosModalProps> = ({
       className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto"
     >
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-300 w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
+        {/* Borde superior dinámico según el color del curso */}
+        <div className="h-1.5 w-full shrink-0" style={{ backgroundColor: cursoTheme.primary }} />
+
         {/* Cabecera del modal */}
         <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between gap-3 border-b border-slate-800">
           <div className="flex items-center gap-2.5 min-w-0">

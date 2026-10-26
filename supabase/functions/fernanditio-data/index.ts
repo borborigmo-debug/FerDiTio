@@ -1159,7 +1159,21 @@ serve(async (req: Request) => {
         }
 
         const nuevaRubrica = rpcData.rubrica;
-        const nuevaActividad = rpcData.actividad;
+        let nuevaActividad = rpcData.actividad;
+
+        // Si se especificó sección/subsección, persistir en public.actividades
+        const seccionIdParam = typeof body?.seccionId === 'string' && body.seccionId.trim() ? body.seccionId.trim() : null;
+        if (seccionIdParam) {
+          const { data: actActualizada } = await supabase
+            .from("actividades")
+            .update({ seccion_id: seccionIdParam })
+            .eq("id", actividadId)
+            .select("id, grupo_id, evaluacion_periodo, nombre, tipo, metodo, rubrica_id, seccion_id")
+            .maybeSingle();
+          if (actActualizada) {
+            nuevaActividad = actActualizada;
+          }
+        }
 
         // 10. Construcción de actividadDetalle congruente con el contrato de la aplicación
         const codigosSet = new Set<string>();
@@ -1171,6 +1185,7 @@ serve(async (req: Request) => {
 
         const actividadDetalle = {
           ...nuevaActividad,
+          seccion_id: seccionIdParam || nuevaActividad.seccion_id || null,
           criteriosCodigos: Array.from(codigosSet),
           estadoVinculacion: "rubrica_confirmada",
           advertenciaRubrica: null,
@@ -1488,9 +1503,11 @@ REGLAS OBLIGATORIAS:
         }
 
         const rawItems = Array.isArray(body?.items) ? body.items : null;
-        if (!rawItems) {
+        const rawTitulo = typeof body?.titulo === 'string' ? body.titulo.trim() : null;
+
+        if (!rawItems && !rawTitulo) {
           return new Response(
-            JSON.stringify({ error: "El parámetro 'items' debe ser un array de apartados." }),
+            JSON.stringify({ error: "Debe proporcionar 'titulo' o 'items' para actualizar la rúbrica." }),
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
@@ -1525,12 +1542,19 @@ REGLAS OBLIGATORIAS:
           );
         }
 
-        // Actualizar los items de la rúbrica con los UUIDs persistentes
+        // Preparar campos a actualizar
+        const updateFields: Record<string, any> = {};
+        if (rawTitulo) {
+          updateFields.titulo = rawTitulo;
+        }
+        if (rawItems) {
+          updateFields.items = rawItems;
+        }
+
+        // Actualizar la rúbrica en Supabase
         const { data: rubricaActualizada, error: updateError } = await supabase
           .from("rubricas")
-          .update({
-            items: rawItems,
-          })
+          .update(updateFields)
           .eq("id", rubricaId)
           .eq("grupo_id", grupo.id)
           .select()
@@ -1541,6 +1565,40 @@ REGLAS OBLIGATORIAS:
             JSON.stringify({ error: `Error al actualizar la rúbrica: ${updateError.message}` }),
             { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
+        }
+
+        // Sincronizar cuadernos_sync si existe
+        try {
+          const { data: syncRow } = await supabase
+            .from("cuadernos_sync")
+            .select("id, payload")
+            .eq("profesor_id", profesor.id)
+            .maybeSingle();
+
+          if (syncRow?.payload) {
+            let p = syncRow.payload;
+            if (typeof p === "string") {
+              try { p = JSON.parse(p); } catch {}
+            }
+            if (p && typeof p === "object" && Array.isArray(p.rubricas)) {
+              let syncModificado = false;
+              p.rubricas = p.rubricas.map((r: any) => {
+                if (r.id === rubricaId) {
+                  syncModificado = true;
+                  return { ...r, ...updateFields };
+                }
+                return r;
+              });
+              if (syncModificado) {
+                await supabase
+                  .from("cuadernos_sync")
+                  .update({ payload: p, updated_at: new Date().toISOString() })
+                  .eq("id", syncRow.id);
+              }
+            }
+          }
+        } catch {
+          // Continuar sin bloquear
         }
 
         return new Response(

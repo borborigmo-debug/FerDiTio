@@ -108,11 +108,84 @@ export async function asegurarYPersistirRubricaUuids(
   };
 }
 
+/**
+ * Actualiza el título de una rúbrica en Supabase a través de la Edge Function fernanditio-data.
+ */
+export async function actualizarRubricaTitulo(
+  grupoId: string,
+  rubricaId: string,
+  nuevoTitulo: string,
+  itemsActuales?: any[]
+): Promise<Rubrica> {
+  if (!grupoId || !rubricaId) {
+    throw new Error('Identificadores de grupo y rúbrica requeridos.');
+  }
+  const cleanTitulo = (nuevoTitulo || '').trim();
+  if (!cleanTitulo) {
+    throw new Error('El título de la rúbrica no puede estar vacío.');
+  }
+
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión autenticada activa para actualizar el título de la rúbrica.');
+  }
+
+  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: 'actualizar_rubrica',
+        grupoId,
+        rubricaId,
+        titulo: cleanTitulo,
+        ...(Array.isArray(itemsActuales) ? { items: itemsActuales } : {}),
+      }),
+    });
+  } catch (err: any) {
+    throw new Error(`Error de red al conectar con el servidor: ${err?.message || 'Fallo de conexión'}`);
+  }
+
+  if (!response.ok) {
+    let detalleError = `HTTP ${response.status}: ${response.statusText}`;
+    try {
+      const errorJson = await response.json();
+      if (errorJson?.error) {
+        detalleError = errorJson.error;
+      }
+    } catch {}
+    throw new Error(`El servidor rechazó la actualización del título (${detalleError}).`);
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Respuesta malformada del servidor al actualizar el título de la rúbrica.');
+  }
+
+  if (!data?.success || !data?.rubrica) {
+    throw new Error(data?.error || 'Supabase no confirmó la actualización del título de la rúbrica.');
+  }
+
+  return {
+    ...data.rubrica,
+    items: parseRubricaItems(data.rubrica.items),
+  };
+}
+
 export interface CrearRubricaPayload {
   grupoId: string;
   titulo: string;
   tipoRubrica: 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
   evaluacionPeriodo: '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
+  seccionId?: string | null;
   descripcion?: string | null;
   items?: Array<{
     id?: string;
@@ -139,7 +212,7 @@ export interface CrearRubricaResultado {
 export async function crearRubricaYActividad(
   payload: CrearRubricaPayload
 ): Promise<CrearRubricaResultado> {
-  const { grupoId, titulo, tipoRubrica, evaluacionPeriodo, descripcion, items = [] } = payload;
+  const { grupoId, titulo, tipoRubrica, evaluacionPeriodo, seccionId, descripcion, items = [] } = payload;
 
   if (!grupoId || !grupoId.trim()) {
     throw new Error('Identificador de grupo inválido para crear la rúbrica.');
@@ -191,6 +264,7 @@ export async function crearRubricaYActividad(
         titulo: titulo.trim(),
         tipoRubrica,
         evaluacionPeriodo,
+        seccionId: seccionId || null,
         descripcion: descripcion?.trim() || null,
         items: itemsConUuid,
       }),
@@ -231,6 +305,7 @@ export async function crearRubricaYActividad(
 
   const actividadRetornada: ActividadDetalle = {
     ...data.actividad,
+    seccion_id: seccionId || data.actividad.seccion_id || null,
     created_at: data.actividad.created_at || new Date().toISOString(),
   };
 
@@ -243,10 +318,12 @@ export async function crearRubricaYActividad(
 
 export interface AnalisisRubricaGeminiParams {
   grupoId: string;
-  origen: 'foto' | 'word';
+  origen: 'foto' | 'word' | 'galeria' | 'pdf' | 'ia' | 'prompt';
   imagenBase64?: string;
   mimeType?: string;
   documentoTexto?: string;
+  promptTexto?: string;
+  pdfBase64?: string;
   criterios?: Array<{ id?: any; codigo: string; descripcion?: string }>;
   grupoNombre?: string;
 }
@@ -275,7 +352,7 @@ export interface BorradorRubricaGemini {
 }
 
 /**
- * Invoca el análisis asistido de rúbricas mediante Gemini a partir de foto o Word.
+ * Invoca el análisis asistido de rúbricas mediante Gemini a partir de foto, galería (imagen/pdf/word) o prompt de IA.
  * Utiliza preferentemente la ruta server-side de la aplicación (/api/gemini/analizar-rubrica)
  * con la SDK oficial @google/genai, y ofrece fallback resiliente.
  */
@@ -295,6 +372,8 @@ export async function analizarRubricaConGemini(
         imagenBase64: params.imagenBase64,
         mimeType: params.mimeType,
         documentoTexto: params.documentoTexto,
+        promptTexto: params.promptTexto,
+        pdfBase64: params.pdfBase64,
         criterios: params.criterios || [],
         grupoNombre: params.grupoNombre,
       }),

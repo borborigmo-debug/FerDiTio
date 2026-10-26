@@ -7,8 +7,9 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Rubrica, Criterio, ActividadDetalle, Alumno, Calificacion, CalificacionApartado } from '../../types';
 import { RubricaDetalle } from './RubricaDetalle';
 import { RubricaEvaluacionModal } from './RubricaEvaluacionModal';
-import { RubricaCrearModal, TipoRubricaCrear } from './RubricaCrearModal';
-import { normalizeRubrica } from '../../utils/rubricaUtils';
+import { RubricaCrearModal, TipoRubricaCrear, OrigenRubricaCrear } from './RubricaCrearModal';
+import { RubricaEditarModal } from './RubricaEditarModal';
+import { normalizeRubrica, NormalizedRubrica } from '../../utils/rubricaUtils';
 import { useCuaderno } from '../../context/CuadernoContext';
 import {
   Table,
@@ -29,6 +30,9 @@ import {
   Plus,
   Camera,
   Sparkles,
+  Calendar,
+  Users,
+  Upload,
 } from 'lucide-react';
 
 interface RubricasViewProps {
@@ -56,7 +60,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
   onUpdateCalificaciones,
   onUpdateCalificacionesApartados,
 }) => {
-  const { updateRubrica, addRubricaYActividad, selectedEvaluacion, eliminarRubricas } = useCuaderno();
+  const { updateRubrica, addRubricaYActividad, selectedEvaluacion, eliminarRubricas, eliminarActividades } = useCuaderno();
 
   // Rúbrica seleccionada actualmente para visualización detallada de la matriz
   const [selectedRubricaId, setSelectedRubricaId] = useState<string | null>(
@@ -66,13 +70,60 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
   // Rúbrica abierta actualmente en modo de evaluación consecutiva de alumnos (modal)
   const [rubricaEvaluando, setRubricaEvaluando] = useState<Rubrica | null>(null);
 
-  // Modal de creación de rúbrica (tipo seleccionado para crear: ACTIVIDAD | TRABAJO | EXAMEN)
-  const [tipoModalCrear, setTipoModalCrear] = useState<TipoRubricaCrear | null>(null);
-  const [origenModalCrear, setOrigenModalCrear] = useState<'foto' | 'word' | null>(null);
+  // Rúbrica abierta actualmente para editar título y suprimir actividades (modal)
+  const [rubricaEditando, setRubricaEditando] = useState<Rubrica | null>(null);
 
-  const handleOpenCrear = (tipo: TipoRubricaCrear, origen?: 'foto' | 'word') => {
+  // Modal de creación de rúbrica (tipo seleccionado: ACTIVIDAD | TRABAJO | EXAMEN y origen)
+  const [tipoModalCrear, setTipoModalCrear] = useState<TipoRubricaCrear | null>(null);
+  const [origenModalCrear, setOrigenModalCrear] = useState<OrigenRubricaCrear>(null);
+  const [archivoParaCrear, setArchivoParaCrear] = useState<File | null>(null);
+
+  // Referencias para abrir cámara y galería síncronamente en el evento de pulsación
+  const camaraInputRef = React.useRef<HTMLInputElement>(null);
+  const galeriaInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleDesdeFotoClick = () => {
+    // Abre la cámara del dispositivo directamente en el gesto del usuario
+    if (camaraInputRef.current) {
+      camaraInputRef.current.click();
+    } else {
+      setTipoModalCrear('ACTIVIDAD');
+      setOrigenModalCrear('foto');
+    }
+  };
+
+  const handleFotoCapturada = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setArchivoParaCrear(file);
+    setTipoModalCrear('ACTIVIDAD');
+    setOrigenModalCrear('foto');
+  };
+
+  const handleDesdeGaleriaClick = () => {
+    // Abre el explorador/galería directamente en el gesto del usuario
+    if (galeriaInputRef.current) {
+      galeriaInputRef.current.click();
+    } else {
+      setTipoModalCrear('ACTIVIDAD');
+      setOrigenModalCrear('galeria');
+    }
+  };
+
+  const handleGaleriaSeleccionada = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setArchivoParaCrear(file);
+    setTipoModalCrear('ACTIVIDAD');
+    setOrigenModalCrear('galeria');
+  };
+
+  const handleOpenCrear = (tipo: TipoRubricaCrear = 'ACTIVIDAD', origen: OrigenRubricaCrear = 'manual') => {
+    setArchivoParaCrear(null);
     setTipoModalCrear(tipo);
-    setOrigenModalCrear(origen || null);
+    setOrigenModalCrear(origen);
   };
 
   // Filtro de búsqueda entre las rúbricas del grupo
@@ -209,8 +260,68 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
     ? rubricas.find((r) => r.id === selectedRubricaId)
     : null;
 
+  // Formato localizado y amigable de la fecha de creación
+  const formatFechaCreacion = (dateVal?: string | null): string => {
+    if (!dateVal) return 'Sin fecha';
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return String(dateVal);
+    return d.toLocaleDateString('es-ES', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+  };
+
+  // Mapa de cantidad de alumnos evaluados con cada rúbrica (conteo único de alumnos)
+  const alumnosEvaluadosMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const rub of normalizedRubricas) {
+      const evaluatedAlumnosIds = new Set<string>();
+
+      // 1. Calificaciones directas de apartados para esta rúbrica
+      if (calificacionesApartados && calificacionesApartados.length > 0) {
+        for (const ca of calificacionesApartados) {
+          if (ca.rubrica_id === rub.id && ca.alumno_id && typeof ca.nota === 'number') {
+            evaluatedAlumnosIds.add(String(ca.alumno_id));
+          }
+        }
+      }
+
+      // 2. Calificaciones registradas en las actividades vinculadas
+      const linkedActs = actividadesPorRubrica.get(rub.id) || [];
+      if (linkedActs.length > 0 && calificaciones && calificaciones.length > 0) {
+        const actIds = new Set(linkedActs.map((a) => a.id));
+        for (const cal of calificaciones) {
+          if (actIds.has(cal.actividad_id) && cal.alumno_id && typeof cal.nota === 'number') {
+            evaluatedAlumnosIds.add(String(cal.alumno_id));
+          }
+        }
+      }
+
+      map.set(rub.id, evaluatedAlumnosIds.size);
+    }
+    return map;
+  }, [normalizedRubricas, calificacionesApartados, calificaciones, actividadesPorRubrica]);
+
   return (
     <div className="space-y-6">
+      {/* Inputs ocultos activados síncronamente en el gesto de pulsación */}
+      <input
+        ref={camaraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleFotoCapturada}
+      />
+      <input
+        ref={galeriaInputRef}
+        type="file"
+        accept="image/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        className="hidden"
+        onChange={handleGaleriaSeleccionada}
+      />
+
       {/* ========================================================
           1. BARRA PRINCIPAL DE ACCIONES Y CREACIÓN DE RÚBRICAS
           Visible SIEMPRE (tanto con catálogo vacío como con rúbricas)
@@ -234,68 +345,50 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             </p>
           </div>
 
-          {/* Los tres botones de creación de rúbricas obligatorios + Asistente Gemini */}
+          {/* Los 4 botones de creación de rúbricas requeridos */}
           <div className="flex flex-wrap items-center gap-2 self-start lg:self-center">
+            {/* 1. Desde foto (realizar fotografía) */}
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-              title="Crear nueva rúbrica para una actividad cotidiana o tarea evaluable"
-            >
-              <FileCheck className="w-4 h-4 text-emerald-600" />
-              <span>Crear rúbrica de Actividad</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleOpenCrear('TRABAJO')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 active:bg-sky-200 border border-sky-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-              title="Crear nueva rúbrica para un trabajo, proyecto monográfico o producción escrita"
-            >
-              <FolderGit2 className="w-4 h-4 text-sky-600" />
-              <span>Crear rúbrica de Trabajo</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleOpenCrear('EXAMEN')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-purple-800 bg-purple-50 hover:bg-purple-100 active:bg-purple-200 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-              title="Crear nueva rúbrica para una prueba escrita o examen"
-            >
-              <GraduationCap className="w-4 h-4 text-purple-600" />
-              <span>Crear rúbrica de Examen</span>
-            </button>
-
-            {/* Separador sutil */}
-            <div className="h-6 w-[1px] bg-slate-300 hidden sm:block mx-0.5" />
-
-            {/* Accesos directos a Gemini (Foto y Word) */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handleOpenCrear('ACTIVIDAD', 'foto');
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-              title="Fotografiar o subir imagen de la rúbrica para estructurarla con Gemini"
+              onClick={handleDesdeFotoClick}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 active:bg-indigo-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Abrir cámara del dispositivo para tomar fotografía de la rúbrica"
             >
               <Camera className="w-4 h-4 text-indigo-600" />
-              <span>Desde Foto</span>
+              <span>Desde foto</span>
             </button>
 
+            {/* 2. Desde galería (archivo, imagen, pdf o word) */}
             <button
               type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handleOpenCrear('ACTIVIDAD', 'word');
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-gradient-to-r from-indigo-50 to-sky-50 hover:from-indigo-100 hover:to-sky-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-              title="Importar documento Word (.docx) para estructurarlo con Gemini"
+              onClick={handleDesdeGaleriaClick}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 active:bg-indigo-100 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Abrir explorador o galería para seleccionar archivo (imagen, PDF o Word) para estructurarlo con Gemini"
             >
-              <FileText className="w-4 h-4 text-indigo-600" />
-              <span>Desde Word (.docx)</span>
+              <Upload className="w-4 h-4 text-indigo-600" />
+              <span>Desde galería</span>
+            </button>
+
+            {/* 3. Rúbrica IA (plantear a Gemini) */}
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'ia')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-purple-900 bg-purple-50 hover:bg-purple-100 active:bg-purple-200 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Plantear a Gemini lo que se desea realizar para generar la rúbrica alineada con los criterios oficiales"
+            >
+              <Sparkles className="w-4 h-4 text-purple-600" />
+              <span>Rúbrica IA</span>
+            </button>
+
+            {/* 4. Crear rúbrica (manual, sin intervención de Gemini) */}
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'manual')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 active:bg-emerald-200 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="El profesor rellena los campos y los criterios manualmente, sin intervención de Gemini"
+            >
+              <Plus className="w-4 h-4 text-emerald-600" />
+              <span>Crear rúbrica</span>
             </button>
           </div>
         </div>
@@ -314,59 +407,53 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
               No hay rúbricas registradas en este grupo
             </h3>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Crea tu primera rúbrica manualmente o utiliza el asistente con Gemini para importar una rúbrica desde fotografía o archivo Word.
+              Crea tu primera rúbrica tomando una fotografía, seleccionando un archivo de la galería, planteándola a la IA o de forma manual.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            {/* 1. Desde foto (realizar fotografía) */}
             <button
               type="button"
-              onClick={() => handleOpenCrear('ACTIVIDAD')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-            >
-              <FileCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Actividad</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleOpenCrear('TRABAJO')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-            >
-              <FolderGit2 className="w-3.5 h-3.5 text-sky-600" />
-              <span>Trabajo</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleOpenCrear('EXAMEN')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
-            >
-              <GraduationCap className="w-3.5 h-3.5 text-purple-600" />
-              <span>Examen</span>
-            </button>
-            <div className="h-5 w-[1px] bg-slate-300 hidden sm:block mx-1" />
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handleOpenCrear('ACTIVIDAD', 'foto');
-              }}
+              onClick={handleDesdeFotoClick}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Abrir cámara del dispositivo para tomar fotografía de la rúbrica"
             >
               <Camera className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Con Foto (Gemini)</span>
+              <span>Desde foto</span>
             </button>
+
+            {/* 2. Desde galería (archivo, imagen, pdf o word) */}
             <button
               type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handleOpenCrear('ACTIVIDAD', 'word');
-              }}
+              onClick={handleDesdeGaleriaClick}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Seleccionar archivo desde galería o explorador (imagen, PDF o Word) para estructurarlo con Gemini"
             >
-              <FileText className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Con Word (Gemini)</span>
+              <Upload className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Desde galería</span>
+            </button>
+
+            {/* 3. Rúbrica IA (plantear a Gemini) */}
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'ia')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Plantear a Gemini lo que se desea realizar para generar la rúbrica alineada con los criterios oficiales"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+              <span>Rúbrica IA</span>
+            </button>
+
+            {/* 4. Crear rúbrica (manual, sin intervención de Gemini) */}
+            <button
+              type="button"
+              onClick={() => handleOpenCrear('ACTIVIDAD', 'manual')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg shadow-2xs transition-all cursor-pointer"
+              title="Crear rúbrica manualmente rellenando campos y criterios (sin intervención de Gemini)"
+            >
+              <Plus className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Crear rúbrica</span>
             </button>
           </div>
         </div>
@@ -590,45 +677,44 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
                           onClick={() => setSelectedRubricaId(rub.id)}
                           className="space-y-1.5 flex-1 cursor-pointer min-w-0"
                         >
-                          <div className="flex items-center gap-2.5 flex-wrap">
-                            <span className="text-xs font-mono text-slate-400">
-                              ID: {rub.id}
-                            </span>
-                            <h3 className="text-base font-bold text-slate-900 hover:text-indigo-600 transition-colors">
-                              {rub.titulo}
-                            </h3>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 uppercase">
-                              {rub.tipo || 'ACTIVIDAD'}
-                            </span>
-                          </div>
+                          <h3 className="text-base font-bold text-slate-900 hover:text-indigo-600 transition-colors">
+                            {rub.titulo}
+                          </h3>
 
-                          {rub.descripcion && (
-                            <p className="text-xs text-slate-500 line-clamp-1 leading-relaxed">
-                              {rub.descripcion}
-                            </p>
-                          )}
+                          <div className="flex items-center gap-3 text-xs text-slate-500 flex-wrap pt-0.5">
+                            <span className="inline-flex items-center gap-1.5 text-slate-600">
+                              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>
+                                Fecha de creación:{' '}
+                                <strong className="text-slate-800 font-semibold">
+                                  {formatFechaCreacion(
+                                    (rub.raw as any)?.created_at ||
+                                    (rub.raw as any)?.fecha ||
+                                    rub.created_at ||
+                                    rub.fecha ||
+                                    acts[0]?.created_at ||
+                                    acts[0]?.fecha
+                                  )}
+                                </strong>
+                              </span>
+                            </span>
 
-                          <div className="flex items-center gap-3 text-xs text-slate-500 pt-1">
-                            <span>
-                              Apartados: <strong className="text-slate-800">{rub.items.length}</strong>
+                            <span className="text-slate-300">·</span>
+
+                            <span className="inline-flex items-center gap-1.5 text-slate-600">
+                              <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span>
+                                Alumnos evaluados:{' '}
+                                <strong className="text-slate-800 font-semibold">
+                                  {alumnosEvaluadosMap.get(rub.id) || 0}
+                                </strong>
+                              </span>
                             </span>
-                            <span>·</span>
-                            <span>
-                              Escala: <strong className="text-slate-800">{rub.niveles.length} niveles</strong>
-                            </span>
-                            {acts.length > 0 && (
-                              <>
-                                <span>·</span>
-                                <span>
-                                  Actividades vinculadas: <strong className="text-slate-800">{acts.length}</strong>
-                                </span>
-                              </>
-                            )}
                           </div>
                         </div>
                       </div>
 
-                      {/* Botones de acción directos: Evaluar, Ver matriz y Eliminar individual */}
+                      {/* Botones de acción directos: Evaluar, Ver matriz, Editar rúbrica y Eliminar individual */}
                       <div className="flex items-center gap-2 self-start md:self-center shrink-0">
                         <button
                           type="button"
@@ -652,8 +738,21 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
                           className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors cursor-pointer"
                           title="Ver matriz y detalles de la rúbrica"
                         >
-                          <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                          <Table className="w-3.5 h-3.5 text-indigo-600" />
                           <span>Ver matriz</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRubricaEditando(rub.raw);
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors cursor-pointer shadow-2xs"
+                          title={`Editar título y suprimir actividades de "${rub.titulo}"`}
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Editar</span>
                         </button>
 
                         <button
@@ -686,11 +785,13 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
           grupoId={grupoId}
           tipoInicial={tipoModalCrear}
           origenInicial={origenModalCrear}
+          archivoInicial={archivoParaCrear}
           periodoInicial={selectedEvaluacion || '1.º Ev'}
           criterios={criterios}
           onClose={() => {
             setTipoModalCrear(null);
             setOrigenModalCrear(null);
+            setArchivoParaCrear(null);
           }}
           onSuccess={(nuevaRubrica, nuevaActividad) => {
             if (addRubricaYActividad) {
@@ -699,6 +800,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
             setSelectedRubricaId(nuevaRubrica.id);
             setTipoModalCrear(null);
             setOrigenModalCrear(null);
+            setArchivoParaCrear(null);
           }}
         />
       )}
@@ -730,6 +832,29 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
           onUpdateCalificacionesApartados={(nuevasApartados) => {
             if (onUpdateCalificacionesApartados) {
               onUpdateCalificacionesApartados(nuevasApartados);
+            }
+          }}
+        />
+      )}
+
+      {/* ========================================================
+          6.1. MODAL DE EDICIÓN DE RÚBRICA (TÍTULO Y SUPRESIÓN DE ACTIVIDADES)
+          ======================================================== */}
+      {rubricaEditando && (
+        <RubricaEditarModal
+          rubrica={rubricaEditando}
+          actividades={actividades}
+          grupoId={grupoId}
+          onClose={() => setRubricaEditando(null)}
+          onSaveRubrica={(rubricaActualizada) => {
+            if (updateRubrica) {
+              updateRubrica(rubricaActualizada);
+            }
+            setRubricaEditando(null);
+          }}
+          onEliminarActividad={async (actId) => {
+            if (eliminarActividades) {
+              await eliminarActividades([actId]);
             }
           }}
         />
