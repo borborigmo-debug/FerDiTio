@@ -4,6 +4,7 @@
  */
 
 import { getCurrentIdToken } from './authService';
+import { fetchFernanditioData } from './apiClient';
 import { CuadernoGrupoData } from '../types';
 import { recuperarRespaldoCalificacionesApartados, purgarActividadesDeRespaldoLocal } from './calificacionesService';
 import { getRubricasEliminadasLocal } from './rubricasService';
@@ -29,8 +30,6 @@ export interface GruposRespuesta {
   message?: string;
 }
 
-const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
-
 /**
  * Consulta de forma segura los grupos del profesor autenticado en Firebase
  * a través de la Edge Function 'fernanditio-data'.
@@ -42,11 +41,8 @@ export async function fetchGruposDocente(): Promise<GruposRespuesta> {
     throw new Error('No existe una sesión de autenticación activa para consultar los grupos.');
   }
 
-  // 2. Endpoint de lectura de grupos en Supabase
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data/groups`;
-
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchFernanditioData('/groups', {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -108,10 +104,9 @@ export async function fetchCuadernoGrupo(
   }
 
   const encodedId = encodeURIComponent(grupoId);
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data/cuaderno?grupoId=${encodedId}`;
 
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchFernanditioData(`/cuaderno?grupoId=${encodedId}`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -311,11 +306,9 @@ export async function eliminarActividadesLote(
     throw new Error('No existe una sesión autenticada activa para eliminar actividades.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
-
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,

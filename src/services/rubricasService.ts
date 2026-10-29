@@ -6,10 +6,9 @@
 import { Rubrica, ActividadDetalle, RubricaItem } from '../types';
 import { parseRubricaItems, isValidUuid, asegurarApartadosConUuid, generateUuid } from '../utils/rubricaUtils';
 import { getCurrentIdToken } from './authService';
+import { fetchFernanditioData } from './apiClient';
 import { registrarActividadesEliminadasLocal } from './gruposService';
 import { purgarRubricasDeRespaldoLocal } from './calificacionesService';
-
-const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
 
 /**
  * Asegura que todos los apartados de una rúbrica dispongan de un identificador UUID persistente,
@@ -56,10 +55,9 @@ export async function asegurarYPersistirRubricaUuids(
     throw new Error('No existe una sesión autenticada activa para persistir los identificadores de la rúbrica en Supabase.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -109,31 +107,41 @@ export async function asegurarYPersistirRubricaUuids(
 }
 
 /**
- * Actualiza el título de una rúbrica en Supabase a través de la Edge Function fernanditio-data.
+ * Actualiza los datos generales de una rúbrica (título, fecha de creación, apartados e ítems)
+ * en Supabase a través de la Edge Function fernanditio-data.
  */
-export async function actualizarRubricaTitulo(
+export async function actualizarRubricaDatos(
   grupoId: string,
   rubricaId: string,
-  nuevoTitulo: string,
-  itemsActuales?: any[]
+  datos: {
+    titulo?: string;
+    fechaCreacion?: string | null;
+    fecha_creacion?: string | null;
+    items?: any[];
+  }
 ): Promise<Rubrica> {
   if (!grupoId || !rubricaId) {
     throw new Error('Identificadores de grupo y rúbrica requeridos.');
   }
-  const cleanTitulo = (nuevoTitulo || '').trim();
-  if (!cleanTitulo) {
+
+  const cleanTitulo = typeof datos.titulo === 'string' ? datos.titulo.trim() : undefined;
+  if (datos.titulo !== undefined && !cleanTitulo) {
     throw new Error('El título de la rúbrica no puede estar vacío.');
   }
 
+  const rawFecha = datos.fechaCreacion || datos.fecha_creacion;
+  const cleanFecha = rawFecha && typeof rawFecha === 'string'
+    ? (rawFecha.includes('T') ? rawFecha.split('T')[0] : rawFecha.trim())
+    : undefined;
+
   const token = await getCurrentIdToken();
   if (!token) {
-    throw new Error('No existe una sesión autenticada activa para actualizar el título de la rúbrica.');
+    throw new Error('No existe una sesión autenticada activa para actualizar la rúbrica.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -144,11 +152,17 @@ export async function actualizarRubricaTitulo(
         tipo: 'actualizar_rubrica',
         grupoId,
         rubricaId,
-        titulo: cleanTitulo,
-        ...(Array.isArray(itemsActuales) ? { items: itemsActuales } : {}),
+        ...(cleanTitulo ? { titulo: cleanTitulo } : {}),
+        ...(cleanFecha ? { fechaCreacion: cleanFecha, fecha_creacion: cleanFecha } : {}),
+        ...(Array.isArray(datos.items) ? { items: datos.items } : {}),
       }),
     });
   } catch (err: any) {
+    if (err instanceof TypeError || err?.message?.includes('fetch') || err?.message?.includes('Network')) {
+      throw new Error(
+        'Error de red o desconexión con Supabase: No se pudo conectar con el servidor para actualizar la rúbrica. Compruebe su conexión o reintente.'
+      );
+    }
     throw new Error(`Error de red al conectar con el servidor: ${err?.message || 'Fallo de conexión'}`);
   }
 
@@ -160,24 +174,39 @@ export async function actualizarRubricaTitulo(
         detalleError = errorJson.error;
       }
     } catch {}
-    throw new Error(`El servidor rechazó la actualización del título (${detalleError}).`);
+    throw new Error(`El servidor rechazó la actualización (${detalleError}).`);
   }
 
   let data: any;
   try {
     data = await response.json();
   } catch {
-    throw new Error('Respuesta malformada del servidor al actualizar el título de la rúbrica.');
+    throw new Error('Respuesta malformada del servidor al actualizar la rúbrica.');
   }
 
   if (!data?.success || !data?.rubrica) {
-    throw new Error(data?.error || 'Supabase no confirmó la actualización del título de la rúbrica.');
+    throw new Error(data?.error || 'Supabase no confirmó la actualización de la rúbrica.');
   }
 
   return {
     ...data.rubrica,
     items: parseRubricaItems(data.rubrica.items),
   };
+}
+
+/**
+ * Actualiza el título de una rúbrica en Supabase a través de la Edge Function fernanditio-data.
+ */
+export async function actualizarRubricaTitulo(
+  grupoId: string,
+  rubricaId: string,
+  nuevoTitulo: string,
+  itemsActuales?: any[]
+): Promise<Rubrica> {
+  return actualizarRubricaDatos(grupoId, rubricaId, {
+    titulo: nuevoTitulo,
+    items: itemsActuales,
+  });
 }
 
 export interface CrearRubricaPayload {
@@ -187,6 +216,8 @@ export interface CrearRubricaPayload {
   evaluacionPeriodo: '1.º Ev' | '2.º Ev' | '3.º Ev' | 'Global';
   seccionId?: string | null;
   descripcion?: string | null;
+  fechaCreacion?: string | null;
+  fecha_creacion?: string | null;
   items?: Array<{
     id?: string;
     numero?: string;
@@ -213,6 +244,7 @@ export async function crearRubricaYActividad(
   payload: CrearRubricaPayload
 ): Promise<CrearRubricaResultado> {
   const { grupoId, titulo, tipoRubrica, evaluacionPeriodo, seccionId, descripcion, items = [] } = payload;
+  const fechaCreacionFinal = payload.fechaCreacion || payload.fecha_creacion || new Date().toISOString();
 
   if (!grupoId || !grupoId.trim()) {
     throw new Error('Identificador de grupo inválido para crear la rúbrica.');
@@ -248,10 +280,9 @@ export async function crearRubricaYActividad(
     throw new Error('No existe una sesión autenticada activa para crear la rúbrica en Supabase.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -266,6 +297,7 @@ export async function crearRubricaYActividad(
         evaluacionPeriodo,
         seccionId: seccionId || null,
         descripcion: descripcion?.trim() || null,
+        fecha_creacion: fechaCreacionFinal,
         items: itemsConUuid,
       }),
     });
@@ -326,6 +358,9 @@ export interface AnalisisRubricaGeminiParams {
   pdfBase64?: string;
   criterios?: Array<{ id?: any; codigo: string; descripcion?: string }>;
   grupoNombre?: string;
+  evaluarOrtografia?: boolean;
+  evaluarPresentacion?: boolean;
+  modoEspecifico?: 'ortografia' | 'presentacion';
 }
 
 export interface ApartadoBorradorGemini {
@@ -359,15 +394,29 @@ export interface BorradorRubricaGemini {
 export async function analizarRubricaConGemini(
   params: AnalisisRubricaGeminiParams
 ): Promise<BorradorRubricaGemini> {
+  if (!params?.grupoId || typeof params.grupoId !== 'string' || !params.grupoId.trim()) {
+    throw new Error('El parámetro grupoId es obligatorio.');
+  }
+
+  const token = await getCurrentIdToken();
+  if (!token) {
+    throw new Error('No existe una sesión autenticada activa para comunicarse con el servidor.');
+  }
+
   // 1. Probar la ruta server-side de Express en la app
+  let resLocal: Response | null = null;
+  let isNetworkError = false;
+
   try {
-    const resLocal = await fetch('/api/gemini/analizar-rubrica', {
+    resLocal = await fetch('/api/gemini/analizar-rubrica', {
       method: 'POST',
       headers: {
+        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
       body: JSON.stringify({
+        grupoId: params.grupoId.trim(),
         origen: params.origen,
         imagenBase64: params.imagenBase64,
         mimeType: params.mimeType,
@@ -376,40 +425,72 @@ export async function analizarRubricaConGemini(
         pdfBase64: params.pdfBase64,
         criterios: params.criterios || [],
         grupoNombre: params.grupoNombre,
+        evaluarOrtografia: params.evaluarOrtografia,
+        evaluarPresentacion: params.evaluarPresentacion,
+        modoEspecifico: params.modoEspecifico,
       }),
     });
+  } catch (localErr: any) {
+    isNetworkError = true;
+    console.warn('[analizarRubricaConGemini] Endpoint local inaccesible o error de red:', localErr?.message || localErr);
+  }
 
-    if (resLocal.ok) {
-      const dataLocal = await resLocal.json();
-      if (dataLocal?.success && dataLocal?.borrador) {
-        return dataLocal.borrador;
-      }
-    } else {
-      let msg = '';
+  if (resLocal) {
+    const status = resLocal.status;
+    const contentType = (resLocal.headers.get('content-type') || '').toLowerCase();
+
+    let rawText = '';
+    try {
+      rawText = await resLocal.text();
+    } catch {
+      rawText = '';
+    }
+
+    let parsedJson: any = null;
+    let isJson = false;
+    if (rawText && rawText.trim()) {
       try {
-        const errJson = await resLocal.json();
-        msg = errJson?.error || '';
+        parsedJson = JSON.parse(rawText);
+        isJson = typeof parsedJson === 'object' && parsedJson !== null;
       } catch {
-        // Ignorar
-      }
-      if (msg) {
-        console.warn('[analizarRubricaConGemini] Servidor devolvió error:', msg);
+        isJson = false;
       }
     }
-  } catch (localErr) {
-    console.warn('[analizarRubricaConGemini] Endpoint local inaccesible, intentando Edge Function:', localErr);
+
+    if (resLocal.ok) {
+      if (!isJson) {
+        const typeInfo = contentType ? ` (${contentType.split(';')[0]})` : '';
+        throw new Error(
+          `El servidor local devolvió una respuesta inesperada no-JSON (HTTP ${status}${typeInfo}). Por favor, reintente.`
+        );
+      }
+
+      if (parsedJson?.success && parsedJson?.borrador) {
+        return parsedJson.borrador;
+      }
+
+      throw new Error(parsedJson?.error || 'No se obtuvo un borrador de rúbrica válido.');
+    }
+
+    // Para cualquier código HTTP de error (400, 401, 403, 429, 500, 502, 503, 504, etc.), NO llamar al fallback
+    let msg = `Error del servidor (HTTP ${status})`;
+    if (isJson && parsedJson?.error) {
+      const errStr = String(parsedJson.error);
+      msg = errStr.includes(String(status)) ? errStr : `${errStr} (HTTP ${status})`;
+    } else if (!isJson && contentType.includes('text/html')) {
+      msg = `El servidor devolvió una página HTML en lugar de JSON (HTTP ${status}).`;
+    }
+    throw new Error(msg);
   }
 
-  // 2. Fallback a Supabase Edge Function
-  const token = await getCurrentIdToken();
-  if (!token) {
-    throw new Error('No existe una sesión autenticada activa para comunicarse con el servidor.');
+  if (!isNetworkError) {
+    throw new Error('No se pudo procesar la solicitud con el servidor local.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
+  // 2. Fallback a Supabase Edge Function (solo ante fallo de red real antes de recibir respuesta HTTP)
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -418,11 +499,18 @@ export async function analizarRubricaConGemini(
       },
       body: JSON.stringify({
         tipo: 'analizar_rubrica_gemini',
-        grupoId: params.grupoId,
+        grupoId: params.grupoId.trim(),
         origen: params.origen,
         imagenBase64: params.imagenBase64,
         mimeType: params.mimeType,
         documentoTexto: params.documentoTexto,
+        promptTexto: params.promptTexto,
+        pdfBase64: params.pdfBase64,
+        criterios: params.criterios || [],
+        grupoNombre: params.grupoNombre,
+        evaluarOrtografia: params.evaluarOrtografia,
+        evaluarPresentacion: params.evaluarPresentacion,
+        modoEspecifico: params.modoEspecifico,
       }),
     });
   } catch (err: any) {
@@ -505,11 +593,9 @@ export async function eliminarRubricasLote(
     throw new Error('No existe una sesión autenticada activa para eliminar rúbricas.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
-
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,

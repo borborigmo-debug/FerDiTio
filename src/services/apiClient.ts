@@ -57,3 +57,44 @@ export async function apiRequest<T = any>(
 
   return response.json();
 }
+
+const SUPABASE_FUNCTIONS_BASE = 'https://bdtkdyzmpbijvwwsbxpa.supabase.co/functions/v1';
+
+/**
+ * Realiza peticiones a la Edge Function 'fernanditio-data' ofreciendo resiliencia
+ * y redundancia: intenta primero la ruta proxy local /api/fernanditio-data (que elimina
+ * el 100% de restricciones CORS del navegador) y cae en fallback a la conexión directa con Supabase.
+ */
+export async function fetchFernanditioData(
+  subpath: string = '',
+  init: RequestInit = {}
+): Promise<Response> {
+  const proxyUrl = `/api/fernanditio-data${subpath}`;
+  const directUrl = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data${subpath}`;
+
+  try {
+   
+const proxyRes = await fetch(proxyUrl, init);
+const contentType = proxyRes.headers.get('content-type') || '';
+
+// Solo aceptar respuestas JSON del proxy.
+// Si Google AI Studio devuelve una página HTML de espera, probar Supabase directamente.
+if (
+  proxyRes.status !== 502 &&
+  contentType.toLowerCase().includes('application/json')
+) {
+  return proxyRes;
+}
+
+console.warn(
+  '[apiClient] El proxy no devolvió JSON válido; se intentará conexión directa con Supabase.',
+  { status: proxyRes.status, contentType }
+);
+
+  } catch (err) {
+    console.warn('[apiClient] Proxy local /api/fernanditio-data inaccesible, conectando directamente con Supabase:', err);
+  }
+
+  // Fallback a conexión directa con la Edge Function
+  return fetch(directUrl, init);
+}

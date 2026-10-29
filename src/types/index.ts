@@ -93,6 +93,7 @@ export interface Rubrica {
   created_at?: string;
   updated_at?: string;
   fecha?: string | null;
+  fecha_creacion?: string | null;
 }
 
 export interface Actividad {
@@ -105,6 +106,7 @@ export interface Actividad {
   metodo?: string | null;
   rubrica_id?: string | null;
   fecha?: string | null;
+  fecha_creacion?: string | null;
   created_at?: string;
   updated_at?: string;
 }

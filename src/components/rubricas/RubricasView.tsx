@@ -230,17 +230,28 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
         return isNaN(parsed) ? 0 : parsed;
       };
 
-      const timeA = parseTime((a.raw as any)?.created_at) || parseTime((a.raw as any)?.fecha) || parseTime(a.created_at);
-      const timeB = parseTime((b.raw as any)?.created_at) || parseTime((b.raw as any)?.fecha) || parseTime(b.created_at);
+      const getRubricaTime = (r: typeof a): number => {
+        const val =
+          r.fecha_creacion ||
+          (r.raw as any)?.fecha_creacion ||
+          (r.raw as any)?.created_at ||
+          (r.raw as any)?.fecha ||
+          r.created_at ||
+          r.fecha;
+        return parseTime(val);
+      };
+
+      const timeA = getRubricaTime(a);
+      const timeB = getRubricaTime(b);
 
       const actsA = actividadesPorRubrica.get(a.id) || [];
       const actsB = actividadesPorRubrica.get(b.id) || [];
       const actTimeA = actsA.reduce((max, act) => {
-        const t = parseTime(act.created_at) || parseTime(act.fecha);
+        const t = parseTime(act.fecha_creacion || act.created_at || act.fecha);
         return Math.max(max, t);
       }, 0);
       const actTimeB = actsB.reduce((max, act) => {
-        const t = parseTime(act.created_at) || parseTime(act.fecha);
+        const t = parseTime(act.fecha_creacion || act.created_at || act.fecha);
         return Math.max(max, t);
       }, 0);
 
@@ -688,10 +699,13 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
                                 Fecha de creación:{' '}
                                 <strong className="text-slate-800 font-semibold">
                                   {formatFechaCreacion(
+                                    rub.fecha_creacion ||
+                                    (rub.raw as any)?.fecha_creacion ||
                                     (rub.raw as any)?.created_at ||
                                     (rub.raw as any)?.fecha ||
                                     rub.created_at ||
                                     rub.fecha ||
+                                    acts[0]?.fecha_creacion ||
                                     acts[0]?.created_at ||
                                     acts[0]?.fecha
                                   )}
@@ -844,6 +858,7 @@ export const RubricasView: React.FC<RubricasViewProps> = ({
         <RubricaEditarModal
           rubrica={rubricaEditando}
           actividades={actividades}
+          criterios={criterios}
           grupoId={grupoId}
           onClose={() => setRubricaEditando(null)}
           onSaveRubrica={(rubricaActualizada) => {

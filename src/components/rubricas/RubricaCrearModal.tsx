@@ -219,6 +219,10 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
   const [analisisSuccessMessage, setAnalisisSuccessMessage] = useState<string | null>(null);
   const [analisisError, setAnalisisError] = useState<string | null>(null);
 
+  // Opciones adicionales de análisis con Gemini
+  const [evaluarOrtografia, setEvaluarOrtografia] = useState(false);
+  const [evaluarPresentacion, setEvaluarPresentacion] = useState(false);
+
   // Estado para la opción 3: Rúbrica IA
   const [promptIaTexto, setPromptIaTexto] = useState('');
   const [mostrarSeccionIa, setMostrarSeccionIa] = useState<boolean>(origenInicial === 'ia');
@@ -326,7 +330,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
       throw new Error('La respuesta de Gemini no contiene un borrador válido.');
     }
 
-    if (borrador.titulo && typeof borrador.titulo === 'string') {
+    // Asignar el título sugerido por Gemini únicamente si el profesor aún no ha escrito un título en el formulario
+    if (!titulo.trim() && borrador.titulo && typeof borrador.titulo === 'string') {
       setTitulo(borrador.titulo.trim());
     }
 
@@ -405,6 +410,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         mimeType,
         criterios,
         grupoNombre,
+        evaluarOrtografia,
+        evaluarPresentacion,
       });
       aplicarBorradorGemini(borrador, file.name);
     } catch (err: any) {
@@ -444,6 +451,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           mimeType,
           criterios,
           grupoNombre,
+          evaluarOrtografia,
+          evaluarPresentacion,
         });
         aplicarBorradorGemini(borrador, file.name);
       } else if (isPdf) {
@@ -465,6 +474,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           mimeType: 'application/pdf',
           criterios,
           grupoNombre,
+          evaluarOrtografia,
+          evaluarPresentacion,
         });
         aplicarBorradorGemini(borrador, file.name);
       } else if (isWord) {
@@ -477,6 +488,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           documentoTexto: textoDocx,
           criterios,
           grupoNombre,
+          evaluarOrtografia,
+          evaluarPresentacion,
         });
         aplicarBorradorGemini(borrador, file.name);
       } else {
@@ -489,6 +502,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
           documentoTexto: texto,
           criterios,
           grupoNombre,
+          evaluarOrtografia,
+          evaluarPresentacion,
         });
         aplicarBorradorGemini(borrador, file.name);
       }
@@ -552,6 +567,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         documentoTexto: textoDocx,
         criterios,
         grupoNombre,
+        evaluarOrtografia,
+        evaluarPresentacion,
       });
       aplicarBorradorGemini(borrador, file.name);
     } catch (err: any) {
@@ -582,6 +599,8 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         promptTexto: promptIaTexto.trim(),
         criterios,
         grupoNombre,
+        evaluarOrtografia,
+        evaluarPresentacion,
       });
       aplicarBorradorGemini(borrador, 'Rúbrica IA');
       setMostrarSeccionIa(false); // Colapsar sección tras generar con éxito
@@ -629,6 +648,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
     setErrorMessage(null);
 
     try {
+      const fechaCreacionIso = new Date().toISOString();
       const resultado = await crearRubricaYActividad({
         grupoId,
         titulo: titulo.trim(),
@@ -636,6 +656,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
         evaluacionPeriodo,
         seccionId: evaluarPorSecciones ? seccionSeleccionadaId : null,
         descripcion: descripcion.trim() || null,
+        fechaCreacion: fechaCreacionIso,
         items: apartados.map((a) => ({
           id: a.id,
           numero: a.numero,
@@ -662,6 +683,7 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
                 tipoRubrica: tipo,
                 evaluacionPeriodo,
                 descripcion: descripcion.trim() || null,
+                fechaCreacion: fechaCreacionIso,
                 items: apartados.map((a) => ({
                   numero: a.numero,
                   titulo: a.titulo.trim(),
@@ -1045,6 +1067,44 @@ export const RubricaCrearModal: React.FC<RubricaCrearModalProps> = ({
             3. DEBAJO: ASISTENCIA Y CONTENIDO DE RÚBRICA
             ======================================================== */}
         <div className="p-5 overflow-y-auto space-y-4 text-slate-800 text-xs flex-1">
+          {/* PANEL DE EVALUACIONES ASISTIDAS ADICIONALES (Ortografía y Presentación) */}
+          <div className="p-3 bg-purple-50/60 border border-purple-200/80 rounded-xl space-y-2 shadow-2xs">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-purple-950 text-xs flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                <span>Evaluación asistida por Gemini (Opciones adicionales)</span>
+              </span>
+              <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">
+                LOMLOE / CyL
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+              <label className="flex items-center gap-2 p-2 bg-white rounded-lg border border-purple-100 hover:border-purple-300 cursor-pointer transition-all select-none">
+                <input
+                  type="checkbox"
+                  checked={evaluarOrtografia}
+                  onChange={(e) => setEvaluarOrtografia(e.target.checked)}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500 cursor-pointer"
+                />
+                <span className="font-semibold text-slate-800">
+                  Evaluar ortografía y expresión escrita
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2 p-2 bg-white rounded-lg border border-purple-100 hover:border-purple-300 cursor-pointer transition-all select-none">
+                <input
+                  type="checkbox"
+                  checked={evaluarPresentacion}
+                  onChange={(e) => setEvaluarPresentacion(e.target.checked)}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500 cursor-pointer"
+                />
+                <span className="font-semibold text-slate-800">
+                  Evaluar presentación y formato
+                </span>
+              </label>
+            </div>
+          </div>
+
           {/* OPCIÓN 3: RÚBRICA IA (PLANTEAMIENTO DIRECTO A GEMINI) */}
           {origenInicial === 'ia' ? (
             <div className="p-3.5 bg-gradient-to-br from-purple-50/80 to-indigo-50/80 border border-purple-200 rounded-xl space-y-2.5">

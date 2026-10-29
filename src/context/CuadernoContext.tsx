@@ -423,9 +423,13 @@ export const CuadernoProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const rubricasActualizadas = (prev.rubricas || []).map((r) =>
           r.id === rubricaActualizada.id ? rubricaActualizada : r
         );
+        const actividadesActualizadas = (prev.actividades || []).map((a) =>
+          a.rubrica_id === rubricaActualizada.id ? { ...a, nombre: rubricaActualizada.titulo } : a
+        );
         return {
           ...prev,
           rubricas: rubricasActualizadas,
+          actividades: actividadesActualizadas,
         };
       });
     },

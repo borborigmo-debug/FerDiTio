@@ -39,7 +39,19 @@ import {
   ChevronDown,
   Info,
   Scale,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
+
+export interface ModoCorreccionCuadernoConfig {
+  indiceActual: number;
+  totalRubricas: number;
+  onSiguienteRubrica: () => Promise<boolean | void> | boolean | void;
+  onAnteriorRubrica?: () => Promise<boolean | void> | boolean | void;
+  esUltimaRubrica: boolean;
+  onFinalizar?: () => void;
+}
 
 interface RubricaEvaluacionModalProps {
   rubrica: Rubrica;
@@ -55,6 +67,7 @@ interface RubricaEvaluacionModalProps {
   onUpdateRubrica?: (rubricaActualizada: Rubrica) => void;
   initialAlumnoId?: string;
   initialActividadId?: string;
+  modoCorreccionCuaderno?: ModoCorreccionCuadernoConfig;
 }
 
 interface ApartadoEvaluacion {
@@ -84,6 +97,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   onUpdateRubrica,
   initialAlumnoId,
   initialActividadId,
+  modoCorreccionCuaderno,
 }) => {
   const { setHasUnsavedChanges, selectedGrupo, eliminarActividades: contextEliminarActividades } = useCuaderno();
   const cursoTheme = useMemo(() => getCursoColorTheme(grupoId, selectedGrupo?.nombre), [grupoId, selectedGrupo]);
@@ -136,6 +150,15 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
     }
     return actividadesAsociadas.length > 0 ? actividadesAsociadas[0].id : null;
   });
+
+  // Sincronizar actividad seleccionada si cambia la rúbrica o las actividades asociadas
+  useEffect(() => {
+    if (initialActividadId && actividadesAsociadas.some((a) => a.id === initialActividadId)) {
+      setActividadSeleccionadaId(initialActividadId);
+    } else {
+      setActividadSeleccionadaId(actividadesAsociadas.length > 0 ? actividadesAsociadas[0].id : null);
+    }
+  }, [rubrica.id, initialActividadId, actividadesAsociadas]);
 
   // Apartados evaluables
   const apartadosEvaluables: ApartadoEvaluacion[] = useMemo(() => {
@@ -191,6 +214,13 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
     return alumnosOrdenados[0]?.id || '';
   });
 
+  // Asegurar sincronización cuando cambia initialAlumnoId (por ejemplo al fijar alumno en modo corrección de cuaderno)
+  useEffect(() => {
+    if (initialAlumnoId && alumnosOrdenados.some((a) => a.id === initialAlumnoId)) {
+      setAlumnoActualId(initialAlumnoId);
+    }
+  }, [initialAlumnoId, alumnosOrdenados]);
+
   // Escala de botones: estándar 5 notas (0, 3, 5, 7, 10) vs 4 notas (0, 4, 7, 10)
   const [escalaMode, setEscalaMode] = useState<RatingScaleMode>('standard5');
 
@@ -205,6 +235,8 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   const [showConfirmCeros, setShowConfirmCeros] = useState<boolean>(false);
   const [showConfirmSalir, setShowConfirmSalir] = useState<boolean>(false);
   const [showConfirmEliminarActividades, setShowConfirmEliminarActividades] = useState<boolean>(false);
+  const [showConfirmCuadernoNav, setShowConfirmCuadernoNav] = useState<boolean>(false);
+  const [pendingCuadernoAction, setPendingCuadernoAction] = useState<'siguiente' | 'anterior' | 'finalizar' | null>(null);
 
   // Sincronizar aviso global
   useEffect(() => {
@@ -483,8 +515,8 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
   };
 
   // Guardar y avanzar
-  const handleGuardarCalificacion = async () => {
-    if (isSaving) return;
+  const handleGuardarCalificacion = async (): Promise<boolean> => {
+    if (isSaving) return false;
     setIsSaving(true);
     setMensajeError(null);
     setMensajeExito(null);
@@ -504,7 +536,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
           const detalle = rubErr?.message || 'Error de comunicación con el servidor';
           setMensajeError(`No se pueden guardar las calificaciones: error al confirmar identificadores (${detalle}).`);
           setIsSaving(false);
-          return;
+          return false;
         }
       }
 
@@ -585,19 +617,81 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
       setHasUnsavedChanges(false);
       setMensajeExito(`¡Calificación guardada para ${alumnoActual?.nombre}!`);
 
-      // 3. Al guardar, avanzar al alumno siguiente según "pendiente", "aleatorio" o lista
-      const siguienteId = obtenerSiguienteAlumnoId(modoPendiente, modoAleatorio);
-      if (siguienteId && siguienteId !== alumnoActualId) {
-        setTimeout(() => {
-          setAlumnoActualId(siguienteId);
-        }, 350);
+      // 3. Al guardar en modo normal, avanzar al alumno siguiente según "pendiente", "aleatorio" o lista
+      // En modo corrección de cuaderno, el alumno debe permanecer estrictamente fijo en toda la secuencia
+      if (!modoCorreccionCuaderno) {
+        const siguienteId = obtenerSiguienteAlumnoId(modoPendiente, modoAleatorio);
+        if (siguienteId && siguienteId !== alumnoActualId) {
+          setTimeout(() => {
+            setAlumnoActualId(siguienteId);
+          }, 350);
+        }
       }
+      return true;
     } catch (err: any) {
       console.error('[RubricaEvaluacionModal] Error al guardar calificaciones:', err);
       setMensajeError(err?.message || 'Error inesperado al guardar calificaciones.');
+      return false;
     } finally {
       setIsSaving(false);
     }
+  };
+
+  // Navegación en modo Corrección de Cuaderno
+  const handleSiguienteRubricaCuaderno = async () => {
+    if (hasModificacionesSinGuardar) {
+      setPendingCuadernoAction('siguiente');
+      setShowConfirmCuadernoNav(true);
+      return;
+    }
+    await modoCorreccionCuaderno?.onSiguienteRubrica();
+  };
+
+  const handleAnteriorRubricaCuaderno = async () => {
+    if (hasModificacionesSinGuardar) {
+      setPendingCuadernoAction('anterior');
+      setShowConfirmCuadernoNav(true);
+      return;
+    }
+    await modoCorreccionCuaderno?.onAnteriorRubrica?.();
+  };
+
+  const handleFinalizarCuaderno = async () => {
+    if (hasModificacionesSinGuardar) {
+      setPendingCuadernoAction('finalizar');
+      setShowConfirmCuadernoNav(true);
+      return;
+    }
+    modoCorreccionCuaderno?.onFinalizar?.();
+  };
+
+  const handleConfirmarGuardarYAvanzarCuaderno = async () => {
+    const ok = await handleGuardarCalificacion();
+    if (ok) {
+      setShowConfirmCuadernoNav(false);
+      if (pendingCuadernoAction === 'siguiente') {
+        await modoCorreccionCuaderno?.onSiguienteRubrica();
+      } else if (pendingCuadernoAction === 'anterior') {
+        await modoCorreccionCuaderno?.onAnteriorRubrica?.();
+      } else if (pendingCuadernoAction === 'finalizar') {
+        modoCorreccionCuaderno?.onFinalizar?.();
+      }
+      setPendingCuadernoAction(null);
+    }
+  };
+
+  const handleConfirmarDescartarYAvanzarCuaderno = async () => {
+    setHasModificacionesSinGuardar(false);
+    setHasUnsavedChanges(false);
+    setShowConfirmCuadernoNav(false);
+    if (pendingCuadernoAction === 'siguiente') {
+      await modoCorreccionCuaderno?.onSiguienteRubrica();
+    } else if (pendingCuadernoAction === 'anterior') {
+      await modoCorreccionCuaderno?.onAnteriorRubrica?.();
+    } else if (pendingCuadernoAction === 'finalizar') {
+      modoCorreccionCuaderno?.onFinalizar?.();
+    }
+    setPendingCuadernoAction(null);
   };
 
   const handleIntentarCerrar = () => {
@@ -635,11 +729,21 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
               FILA 1 (PARTE SUPERIOR): CURSO Y NOMBRE DE LA RÚBRICA
               Se oculta al realizar scroll hacia abajo.
               ======================================================== */}
-          <div className="bg-[#1e3a8a] text-white px-3 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 shadow-xs select-none">
+          <div className={`text-white px-3 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 shadow-xs select-none ${
+            modoCorreccionCuaderno ? 'bg-emerald-900' : 'bg-[#1e3a8a]'
+          }`}>
             <div className="min-w-0 flex items-center gap-2 flex-wrap">
-              <span className="px-2 py-0.5 rounded bg-blue-600/70 border border-blue-400/40 text-[11px] sm:text-xs font-bold tracking-wide uppercase shrink-0">
+              <span className={`px-2 py-0.5 rounded border text-[11px] sm:text-xs font-bold tracking-wide uppercase shrink-0 ${
+                modoCorreccionCuaderno ? 'bg-emerald-700/80 border-emerald-500/50 text-emerald-100' : 'bg-blue-600/70 border-blue-400/40'
+              }`}>
                 {selectedGrupo?.nombre || 'Curso'}
               </span>
+              {modoCorreccionCuaderno && (
+                <span className="px-2 py-0.5 rounded bg-emerald-800 text-emerald-200 border border-emerald-600/50 text-[11px] font-bold flex items-center gap-1 shrink-0">
+                  <BookOpen className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>Corrección de Cuaderno ({modoCorreccionCuaderno.indiceActual + 1}/{modoCorreccionCuaderno.totalRubricas})</span>
+                </span>
+              )}
               <h2 className="text-xs sm:text-sm font-bold text-white truncate max-w-xs sm:max-w-md" title={rubrica.titulo}>
                 {rubrica.titulo}
               </h2>
@@ -648,7 +752,7 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
             <button
               type="button"
               onClick={handleIntentarCerrar}
-              className="p-1 text-blue-200 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer shrink-0"
+              className="p-1 text-emerald-100 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer shrink-0"
               title="Cerrar modal"
             >
               <X className="w-5 h-5" />
@@ -656,119 +760,186 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
           </div>
 
           {/* ========================================================
-              FILA 2 (DEBAJO): OPCIONES DE SELECCIÓN DE ALUMNO
-              "pendiente" (reloj de arena) y "aleatorio" (dado).
-              Se activan/desactivan independientemente, ambas o ninguna.
-              Se ocultan al realizar scroll hacia abajo.
+              FILA 2 (DEBAJO): OPCIONES DE SELECCIÓN DE ALUMNO O PROGRESO CUADERNO
               ======================================================== */}
-          <div className="p-2 sm:p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs select-none">
-            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mr-1">
-                Selección de alumno:
-              </span>
+          {modoCorreccionCuaderno ? (
+            <div className="p-2 sm:p-2.5 bg-emerald-50 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs select-none">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <span className="font-bold text-emerald-900 flex items-center gap-1.5 text-xs">
+                  <BookOpen className="w-4 h-4 text-emerald-700" />
+                  <span>Rúbrica {modoCorreccionCuaderno.indiceActual + 1} de {modoCorreccionCuaderno.totalRubricas}</span>
+                </span>
+                <div className="w-28 sm:w-44 bg-emerald-200 h-2.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-emerald-600 h-full transition-all duration-300 rounded-full"
+                    style={{ width: `${Math.round(((modoCorreccionCuaderno.indiceActual + 1) / modoCorreccionCuaderno.totalRubricas) * 100)}%` }}
+                  />
+                </div>
+                <span className="text-[11px] font-mono font-bold text-emerald-700">
+                  {Math.round(((modoCorreccionCuaderno.indiceActual + 1) / modoCorreccionCuaderno.totalRubricas) * 100)}%
+                </span>
+              </div>
 
-              {/* Opción "Pendiente": reloj de arena */}
-              <button
-                type="button"
-                onClick={() => setModoPendiente((prev) => !prev)}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                  modoPendiente
-                    ? 'bg-amber-500 text-white border-amber-600 shadow-2xs ring-1 ring-amber-400'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                }`}
-                title="Selecciona al alumno con menos calificaciones en el criterio de la actividad seleccionada"
-              >
-                <Hourglass className={`w-3.5 h-3.5 ${modoPendiente ? 'text-white' : 'text-amber-600'}`} />
-                <span>Pendiente</span>
-                {modoPendiente && <Check className="w-3 h-3 stroke-[3]" />}
-              </button>
-
-              {/* Opción "Aleatorio": icono de dado */}
-              <button
-                type="button"
-                onClick={() => setModoAleatorio((prev) => !prev)}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                  modoAleatorio
-                    ? 'bg-indigo-600 text-white border-indigo-700 shadow-2xs ring-1 ring-indigo-400'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                }`}
-                title="Selección aleatoria de alumno"
-              >
-                <Dices className={`w-3.5 h-3.5 ${modoAleatorio ? 'text-white' : 'text-indigo-600'}`} />
-                <span>Aleatorio</span>
-                {modoAleatorio && <Check className="w-3 h-3 stroke-[3]" />}
-              </button>
-
-              {/* Botón rápido para saltar al siguiente con las opciones activas */}
-              {(modoPendiente || modoAleatorio) && (
+              {/* Selector de escala de notas */}
+              <div className="flex items-center gap-1 text-[11px] text-slate-500">
+                <span className="hidden sm:inline">Escala:</span>
                 <button
                   type="button"
-                  onClick={handleAplicarSeleccionAlumno}
-                  className="px-2 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors cursor-pointer"
+                  onClick={() => setEscalaMode('standard5')}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                    escalaMode === 'standard5'
+                      ? 'bg-emerald-700 text-white border border-emerald-800'
+                      : 'bg-white text-slate-600 border border-slate-200'
+                  }`}
+                  title="0 · 3 · 5 · 7 · 10"
                 >
-                  Elegir ahora
+                  0-3-5-7-10
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={() => setEscalaMode('standard4')}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                    escalaMode === 'standard4'
+                      ? 'bg-emerald-700 text-white border border-emerald-800'
+                      : 'bg-white text-slate-600 border border-slate-200'
+                  }`}
+                  title="0 · 4 · 7 · 10"
+                >
+                  0-4-7-10
+                </button>
+              </div>
             </div>
+          ) : (
+            <div className="p-2 sm:p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs select-none">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mr-1">
+                  Selección de alumno:
+                </span>
 
-            {/* Selector de escala de notas */}
-            <div className="flex items-center gap-1 text-[11px] text-slate-500">
-              <span className="hidden sm:inline">Escala:</span>
-              <button
-                type="button"
-                onClick={() => setEscalaMode('standard5')}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
-                  escalaMode === 'standard5'
-                    ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                    : 'bg-white text-slate-600 border border-slate-200'
-                }`}
-                title="0 · 3 · 5 · 7 · 10"
-              >
-                0-3-5-7-10
-              </button>
-              <button
-                type="button"
-                onClick={() => setEscalaMode('standard4')}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
-                  escalaMode === 'standard4'
-                    ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                    : 'bg-white text-slate-600 border border-slate-200'
-                }`}
-                title="0 · 4 · 7 · 10"
-              >
-                0-4-7-10
-              </button>
+                {/* Opción "Pendiente": reloj de arena */}
+                <button
+                  type="button"
+                  onClick={() => setModoPendiente((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                    modoPendiente
+                      ? 'bg-amber-500 text-white border-amber-600 shadow-2xs ring-1 ring-amber-400'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                  title="Selecciona al alumno con menos calificaciones en el criterio de la actividad seleccionada"
+                >
+                  <Hourglass className={`w-3.5 h-3.5 ${modoPendiente ? 'text-white' : 'text-amber-600'}`} />
+                  <span>Pendiente</span>
+                  {modoPendiente && <Check className="w-3 h-3 stroke-[3]" />}
+                </button>
+
+                {/* Opción "Aleatorio": icono de dado */}
+                <button
+                  type="button"
+                  onClick={() => setModoAleatorio((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                    modoAleatorio
+                      ? 'bg-indigo-600 text-white border-indigo-700 shadow-2xs ring-1 ring-indigo-400'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                  title="Selección aleatoria de alumno"
+                >
+                  <Dices className={`w-3.5 h-3.5 ${modoAleatorio ? 'text-white' : 'text-indigo-600'}`} />
+                  <span>Aleatorio</span>
+                  {modoAleatorio && <Check className="w-3 h-3 stroke-[3]" />}
+                </button>
+
+                {/* Botón rápido para saltar al siguiente con las opciones activas */}
+                {(modoPendiente || modoAleatorio) && (
+                  <button
+                    type="button"
+                    onClick={handleAplicarSeleccionAlumno}
+                    className="px-2 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors cursor-pointer"
+                  >
+                    Elegir ahora
+                  </button>
+                )}
+              </div>
+
+              {/* Selector de escala de notas */}
+              <div className="flex items-center gap-1 text-[11px] text-slate-500">
+                <span className="hidden sm:inline">Escala:</span>
+                <button
+                  type="button"
+                  onClick={() => setEscalaMode('standard5')}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                    escalaMode === 'standard5'
+                      ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                      : 'bg-white text-slate-600 border border-slate-200'
+                  }`}
+                  title="0 · 3 · 5 · 7 · 10"
+                >
+                  0-3-5-7-10
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEscalaMode('standard4')}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                    escalaMode === 'standard4'
+                      ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                      : 'bg-white text-slate-600 border border-slate-200'
+                  }`}
+                  title="0 · 4 · 7 · 10"
+                >
+                  0-4-7-10
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* ========================================================
-              FILA 3 (DEBAJO): DESPLEGABLE DE SELECCIÓN DE ALUMNO
+              FILA 3 (DEBAJO): SELECCIÓN / FIJACIÓN DE ALUMNO
               SIEMPRE VISIBLE (sticky top-0 z-30 al hacer scroll)
               ======================================================== */}
           <div className="sticky top-0 z-30 bg-white px-3 sm:px-5 py-2 border-b border-slate-200 shadow-2xs flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 flex-1 min-w-0">
-              <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                <User className="w-4 h-4" />
+            {modoCorreccionCuaderno ? (
+              <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0 font-bold text-xs border border-emerald-300 shadow-2xs">
+                  {alumnoActual?.orden !== undefined ? alumnoActual.orden : <User className="w-4 h-4" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs sm:text-sm font-bold text-slate-900 truncate">
+                      {alumnoActual?.orden !== undefined ? `${alumnoActual.orden}. ` : ''}{alumnoActual?.nombre}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0">
+                      Alumno fijo en corrección de cuaderno
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 truncate">
+                    El alumno se mantiene fijo en todas las rúbricas del cuaderno para agilizar la corrección.
+                  </div>
+                </div>
               </div>
-              <div className="flex-1 min-w-0">
-                <select
-                  id="select-alumno-modal"
-                  value={alumnoActualId}
-                  onChange={(e) => cambiarAlumnoConSeguridad(e.target.value)}
-                  className="w-full bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-900 font-bold text-xs sm:text-sm rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-2xs cursor-pointer truncate"
-                >
-                  {alumnosOrdenados.map((al) => {
-                    const est = alumnosEstadoMap.get(al.id);
-                    const tag = est?.esPendiente ? '⏳ (Pendiente)' : '✅ (Evaluado)';
-                    return (
-                      <option key={al.id} value={al.id}>
-                        {al.orden !== undefined ? `${al.orden}. ` : ''}{al.nombre} {tag}
-                      </option>
-                    );
-                  })}
-                </select>
+            ) : (
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                  <User className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <select
+                    id="select-alumno-modal"
+                    value={alumnoActualId}
+                    onChange={(e) => cambiarAlumnoConSeguridad(e.target.value)}
+                    className="w-full bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-900 font-bold text-xs sm:text-sm rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-2xs cursor-pointer truncate"
+                  >
+                    {alumnosOrdenados.map((al) => {
+                      const est = alumnosEstadoMap.get(al.id);
+                      const tag = est?.esPendiente ? '⏳ (Pendiente)' : '✅ (Evaluado)';
+                      return (
+                        <option key={al.id} value={al.id}>
+                          {al.orden !== undefined ? `${al.orden}. ` : ''}{al.nombre} {tag}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="flex items-center gap-1.5 shrink-0 text-xs">
               <span className="hidden sm:inline font-mono text-[11px] text-slate-500">
@@ -1034,18 +1205,24 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
             FILA 5 (DEBAJO): PIE CON BOTONES DE ACCIÓN
             1. "0 en todas las actividades"
             2. "Cerrar"
-            3. "Guardar"
-            Al guardar, se muestra al alumno siguiente según las opciones.
+            3. "Guardar" / "Siguiente rúbrica" / "Finalizar"
             ======================================================== */}
         <div className="p-2.5 sm:p-3.5 bg-slate-100 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 select-none shrink-0">
           {/* Botón 0 en todas las actividades */}
-          <button
-            type="button"
-            onClick={() => setShowConfirmCeros(true)}
-            className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 active:bg-rose-800 rounded-lg shadow-2xs transition-colors cursor-pointer flex items-center gap-1"
-          >
-            <span>0 en todas las actividades</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowConfirmCeros(true)}
+              className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 active:bg-rose-800 rounded-lg shadow-2xs transition-colors cursor-pointer flex items-center gap-1"
+            >
+              <span>0 en todas</span>
+            </button>
+            {modoCorreccionCuaderno && (
+              <span className="text-[11px] font-mono text-emerald-800 hidden md:inline font-semibold">
+                Rúbrica {modoCorreccionCuaderno.indiceActual + 1} de {modoCorreccionCuaderno.totalRubricas}
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-2">
             {/* Botón Cerrar */}
@@ -1057,16 +1234,59 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
               Cerrar
             </button>
 
+            {/* En modo corrección de cuaderno: Botón Rúbrica Anterior */}
+            {modoCorreccionCuaderno && modoCorreccionCuaderno.indiceActual > 0 && (
+              <button
+                type="button"
+                onClick={handleAnteriorRubricaCuaderno}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg shadow-2xs transition-colors cursor-pointer"
+                title="Ir a la rúbrica anterior del cuaderno manteniendo al alumno"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Rúbrica anterior</span>
+                <span className="sm:hidden">Anterior</span>
+              </button>
+            )}
+
             {/* Botón Guardar */}
             <button
               type="button"
-              onClick={handleGuardarCalificacion}
+              onClick={() => handleGuardarCalificacion()}
               disabled={isSaving}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold text-white bg-[#1e40af] hover:bg-[#1d4ed8] active:bg-[#1e3a8a] rounded-lg shadow-sm transition-colors disabled:opacity-60 cursor-pointer"
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-white rounded-lg shadow-sm transition-colors disabled:opacity-60 cursor-pointer ${
+                modoCorreccionCuaderno
+                  ? 'bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900'
+                  : 'bg-[#1e40af] hover:bg-[#1d4ed8] active:bg-[#1e3a8a]'
+              }`}
             >
               <Save className="w-3.5 h-3.5" />
               <span>{isSaving ? 'Guardando...' : 'Guardar'}</span>
             </button>
+
+            {/* En modo corrección de cuaderno: Botón Siguiente Rúbrica o Finalizar */}
+            {modoCorreccionCuaderno && (
+              modoCorreccionCuaderno.esUltimaRubrica ? (
+                <button
+                  type="button"
+                  onClick={handleFinalizarCuaderno}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 rounded-lg shadow-sm transition-colors cursor-pointer"
+                  title="Finalizar la corrección de todas las rúbricas del cuaderno para este alumno"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Finalizar cuaderno</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSiguienteRubricaCuaderno}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 rounded-lg shadow-sm transition-colors cursor-pointer"
+                  title="Pasar a la siguiente rúbrica del cuaderno manteniendo al mismo alumno"
+                >
+                  <span>Siguiente rúbrica</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              )
+            )}
           </div>
         </div>
       </div>
@@ -1164,6 +1384,49 @@ export const RubricaEvaluacionModal: React.FC<RubricaEvaluacionModalProps> = ({
               >
                 Descartar y salir
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de confirmación en Corrección de Cuaderno: Cambios sin guardar al navegar entre rúbricas */}
+      {showConfirmCuadernoNav && (
+        <div className="fixed inset-0 z-60 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl border border-slate-200 p-5 max-w-sm w-full space-y-3 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-2.5 text-amber-600 font-bold text-sm">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <span>Cambios sin guardar</span>
+            </div>
+            <p className="text-xs text-slate-600">
+              Has modificado calificaciones de <strong>{alumnoActual?.nombre}</strong> en esta rúbrica.
+              ¿Deseas guardarlas antes de continuar con la corrección del cuaderno?
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleConfirmarGuardarYAvanzarCuaderno}
+                disabled={isSaving}
+                className="w-full py-1.5 px-3 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 rounded-lg cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{isSaving ? 'Guardando en Supabase...' : 'Guardar y avanzar'}</span>
+              </button>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmCuadernoNav(false)}
+                  className="px-3 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmarDescartarYAvanzarCuaderno}
+                  className="px-3 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                >
+                  Descartar cambios
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -5,6 +5,7 @@
 
 import { Calificacion, CalificacionApartado } from '../types';
 import { getCurrentIdToken } from './authService';
+import { fetchFernanditioData } from './apiClient';
 import { isValidUuid } from '../utils/rubricaUtils';
 
 export interface GuardarCalificacionesPayload {
@@ -153,10 +154,8 @@ export async function guardarCalificacionesEvaluacion(
     throw new Error('No existe una sesión de autenticación activa para persistir las calificaciones en Supabase.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data/calificaciones`;
-
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchFernanditioData('/calificaciones', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -515,10 +514,8 @@ export async function guardarCalificacionesApartados(
     throw new Error('No existe una sesión de autenticación activa para persistir en Supabase.');
   }
 
-  const endpoint = `${SUPABASE_FUNCTIONS_BASE}/fernanditio-data`;
-
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchFernanditioData('', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,

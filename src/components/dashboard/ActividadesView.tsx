@@ -19,13 +19,15 @@ import {
   ChevronDown,
   Layers,
   Sparkles,
-  Award,
   Filter,
   Trash2,
+  BookOpen,
+  Award,
 } from 'lucide-react';
 import { ActividadDetalle, Rubrica, Calificacion, Alumno, Criterio, Seccion, CalificacionApartado } from '../../types';
 import { normalizeRubrica, NormalizedRubrica, compararCodigosCriterio, compararCriterios, compararSecciones } from '../../utils/rubricaUtils';
 import { CriterioDetalleModal } from './CriterioDetalleModal';
+import { CorreccionCuadernoModal } from './CorreccionCuadernoModal';
 
 export interface EvidenciaItem {
   actividadId: string;
@@ -60,6 +62,7 @@ export const ActividadesView: React.FC = () => {
     eliminarActividades,
     updateCalificaciones,
     updateCalificacionesApartados,
+    updateRubrica,
     selectedGrupoId,
   } = useCuaderno();
 
@@ -68,6 +71,9 @@ export const ActividadesView: React.FC = () => {
 
   // Alternar entre la Tabla de Evaluación principal y el Catálogo de Actividades
   const [vistaActiva, setVistaActiva] = useState<'tabla' | 'catalogo'>('tabla');
+
+  // Estado del modal de corrección consecutiva de cuaderno
+  const [isCorreccionCuadernoOpen, setIsCorreccionCuadernoOpen] = useState<boolean>(false);
 
   // Estado del modal de detalle de criterio (para modificar notas o eliminar actividades al pulsar en la media)
   const [modalCriterioData, setModalCriterioData] = useState<{
@@ -766,6 +772,17 @@ export const ActividadesView: React.FC = () => {
               Catálogo de Actividades ({actividades.length})
             </button>
           </div>
+
+          {/* Botón de acción rápida: Corrección consecutiva de rúbricas del cuaderno */}
+          <button
+            type="button"
+            onClick={() => setIsCorreccionCuadernoOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-2xs transition-all cursor-pointer"
+            title="Corregir consecutivamente las rúbricas del cuaderno para un alumno sin tener que seleccionarlo en cada rúbrica"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-emerald-100" />
+            <span>Corrección cuaderno</span>
+          </button>
         </div>
       </div>
 
@@ -1745,6 +1762,26 @@ export const ActividadesView: React.FC = () => {
           onEliminarActividad={async (actId) => {
             await eliminarActividades([actId]);
           }}
+        />
+      )}
+
+      {/* Modal de Corrección Consecutiva de Rúbricas del Cuaderno */}
+      {isCorreccionCuadernoOpen && (
+        <CorreccionCuadernoModal
+          isOpen={isCorreccionCuadernoOpen}
+          onClose={() => setIsCorreccionCuadernoOpen(false)}
+          grupoId={grupo?.id || selectedGrupoId || ''}
+          grupoNombre={grupo?.nombre || 'Curso'}
+          alumnos={alumnos}
+          rubricas={rubricas}
+          actividades={actividades}
+          criterios={criterios}
+          secciones={secciones}
+          calificaciones={calificaciones}
+          calificacionesApartados={calificacionesApartados}
+          onUpdateCalificaciones={updateCalificaciones}
+          onUpdateCalificacionesApartados={updateCalificacionesApartados}
+          onUpdateRubrica={updateRubrica}
         />
       )}
     </div>

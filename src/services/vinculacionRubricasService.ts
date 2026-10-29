@@ -146,6 +146,7 @@ export interface DatosRubricaReplicar {
   tipoRubrica: 'ACTIVIDAD' | 'TRABAJO' | 'EXAMEN';
   evaluacionPeriodo: EvaluacionPeriodo;
   descripcion: string | null;
+  fechaCreacion?: string | null;
   items: Array<{
     id?: string;
     numero: string;
@@ -186,6 +187,7 @@ export async function replicarRubricaEnGrupos(
         evaluacionPeriodo: datos.evaluacionPeriodo,
         seccionId: null, // Para los grupos vinculados, no se asume misma sección
         descripcion: datos.descripcion,
+        fechaCreacion: datos.fechaCreacion,
         items: itemsConNuevosUuids,
       });
 

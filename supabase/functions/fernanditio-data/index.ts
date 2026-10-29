@@ -21,19 +21,28 @@ const ALLOWED_ORIGINS = [
   "http://localhost:3000",
 ];
 
+function isOriginAllowed(origin: string): boolean {
+  if (!origin) return true;
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  const customOrigin = Deno.env.get("ALLOWED_ORIGIN");
+  if (customOrigin && origin === customOrigin) return true;
+  if (origin.endsWith(".run.app") || origin.endsWith(".ai.studio")) return true;
+  if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:") || origin === "http://localhost") return true;
+  return false;
+}
+
 function getCorsHeaders(req: Request): { headers: Record<string, string>; isAllowed: boolean } {
   const origin = req.headers.get("origin") || "";
-  const customOrigin = Deno.env.get("ALLOWED_ORIGIN");
-  const isAllowed = ALLOWED_ORIGINS.includes(origin) || (Boolean(customOrigin) && origin === customOrigin);
+  const isAllowed = isOriginAllowed(origin);
 
   return {
     headers: {
-      "Access-Control-Allow-Origin": isAllowed ? origin : ALLOWED_ORIGINS[0],
+      "Access-Control-Allow-Origin": isAllowed ? (origin || ALLOWED_ORIGINS[0]) : ALLOWED_ORIGINS[0],
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
       "Vary": "Origin",
     },
-    isAllowed: !origin || isAllowed, // Permite peticiones sin cabecera origin (curl/servidor) o orígenes validados
+    isAllowed: !origin || isAllowed,
   };
 }
 
@@ -359,6 +368,348 @@ serve(async (req: Request) => {
         return new Response(
           JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
           { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // =========================================================================
+      // GESTIÓN DE RÚBRICAS CON GEMINI (FALLBACK DE SERVIDOR)
+      // =========================================================================
+      if (body?.tipo === 'analizar_rubrica_gemini') {
+        const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+        if (!geminiApiKey) {
+          return new Response(
+            JSON.stringify({ error: "No se ha configurado la variable de entorno GEMINI_API_KEY en Supabase." }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const origen = body?.origen;
+        const imagenBase64 = body?.imagenBase64;
+        const mimeType = body?.mimeType;
+        const documentoTexto = body?.documentoTexto;
+        const promptTexto = body?.promptTexto;
+        const pdfBase64 = body?.pdfBase64;
+        const evaluarOrtografia = body?.evaluarOrtografia === true;
+        const evaluarPresentacion = body?.evaluarPresentacion === true;
+        const modoEspecifico = body?.modoEspecifico;
+
+        if (!modoEspecifico) {
+          if (origen === 'foto' && !imagenBase64) {
+            return new Response(
+              JSON.stringify({ error: "No se ha proporcionado la fotografía para el análisis con Gemini." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          if (origen === 'word' && !documentoTexto) {
+            return new Response(
+              JSON.stringify({ error: "No se ha proporcionado el contenido extraído del documento Word." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          if ((origen === 'ia' || origen === 'prompt') && !promptTexto) {
+            return new Response(
+              JSON.stringify({ error: "No se ha proporcionado el texto o planteamiento de la rúbrica para Gemini." }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+        }
+
+        // Obtener la lista oficial de criterios de la base de datos para este grupo
+        let criteriosGrupo: Array<{ codigo: string; descripcion: string }> = [];
+        const { data: dbCriterios, error: dbCriteriosErr } = await supabase
+          .from("criterios")
+          .select("codigo, descripcion")
+          .eq("grupo_id", grupo.id);
+
+        if (dbCriteriosErr) {
+          return new Response(
+            JSON.stringify({ error: `Error al consultar los criterios del grupo: ${dbCriteriosErr.message}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        if (Array.isArray(dbCriterios) && dbCriterios.length > 0) {
+          criteriosGrupo = dbCriterios.map((c: any) => ({
+            codigo: String(c.codigo || '').trim(),
+            descripcion: String(c.descripcion || '').trim(),
+          }));
+        }
+
+        const listaCriteriosTexto = criteriosGrupo.length > 0
+          ? criteriosGrupo.map((c) => `- Código: "${c.codigo}" | Descripción: "${c.descripcion}"`).join('\n')
+          : 'No hay lista previa especificada.';
+
+        let instruccionesAdicionales = '';
+        if (evaluarOrtografia) {
+          instruccionesAdicionales += '\n- INCLUIR OBLIGATORIAMENTE APARTADO: Genera un apartado específico titulado "Ortografía y expresión escrita" para evaluar la corrección ortográfica, gramatical y sintáctica, asociándolo a los criterios oficiales del grupo que correspondan a la expresión escrita u ortografía.';
+        }
+        if (evaluarPresentacion) {
+          instruccionesAdicionales += '\n- INCLUIR OBLIGATORIAMENTE APARTADO: Genera un apartado específico titulado "Presentación y formato" para evaluar el orden, la limpieza, la legibilidad y la maquetación, asociándolo a los criterios oficiales del grupo que correspondan.';
+        }
+
+        const promptInstrucciones = modoEspecifico === 'ortografia'
+          ? `Eres un asistente docente experto en evaluación educativa de Lengua Castellana y Literatura.
+Genera un apartado de evaluación único para "Ortografía y expresión escrita" en una rúbrica analítica.
+LISTA OFICIAL DE CRITERIOS DE EVALUACIÓN AUTORIZADOS PARA ESTE GRUPO:
+${listaCriteriosTexto}
+
+REGLAS:
+1. "titulo": "Ortografía y expresión escrita"
+2. "criterios": Asocia exclusivamente códigos de la lista oficial de criterios del grupo que correspondan a la corrección ortográfica, gramatical o sintáctica (o [] si no hay coincidencia).
+3. "descriptores": Descriptores precisos en español para los niveles '1', '2', '3', '4':
+   "1": Inicial/Insuficiente (Frecuentes errores ortográficos y gramaticales que dificultan la comprensión)
+   "2": En proceso/Suficiente (Ocasionales errores ortográficos o de puntuación que no impiden la lectura)
+   "3": Conseguido/Notable (Prácticamente sin errores ortográficos, sintaxis correcta)
+   "4": Avanzado/Sobresaliente (Ortografía e higiene lingüística impecable, vocabulario preciso)
+4. "peso": 100
+5. "numero": "1"`
+          : modoEspecifico === 'presentacion'
+          ? `Eres un asistente docente experto en evaluación educativa de Lengua Castellana y Literatura.
+Genera un apartado de evaluación único para "Presentación y formato" en una rúbrica analítica.
+LISTA OFICIAL DE CRITERIOS DE EVALUACIÓN AUTORIZADOS PARA ESTE GRUPO:
+${listaCriteriosTexto}
+
+REGLAS:
+1. "titulo": "Presentación y formato"
+2. "criterios": Asocia exclusivamente códigos de la lista oficial de criterios del grupo que correspondan a la presentación, orden, maquetación o limpieza (o [] si no hay coincidencia).
+3. "descriptores": Descriptores precisos en español para los niveles '1', '2', '3', '4':
+   "1": Inicial/Insuficiente (Presentación descuidada, sucia, desorganizada o con tipografía ilegible)
+   "2": En proceso/Suficiente (Presentación aceptable, respeta márgenes y estructura básica)
+   "3": Conseguido/Notable (Presentación limpia, bien estructurada, pulcra y cuidada)
+   "4": Avanzado/Sobresaliente (Excelente maquetación, formato profesional, impecable orden y pulcritud)
+4. "peso": 100
+5. "numero": "1"`
+          : `Eres un asistente docente experto en evaluación educativa y diseño curricular de Lengua Castellana y Literatura (ESO y Bachillerato).
+Tu misión es estructurar y normalizar una rúbrica de evaluación pedagógica, vinculando cada apartado exclusivamente a los criterios oficiales del grupo indicados a continuación.
+
+LISTA OFICIAL DE CRITERIOS DE EVALUACIÓN AUTORIZADOS PARA ESTE GRUPO:
+${listaCriteriosTexto}
+
+REGLAS OBLIGATORIAS:
+1. SOLO puedes asociar a cada apartado códigos que pertenezcan ESTRICTAMENTE a la lista oficial anterior.
+2. Si un apartado o actividad evalúa un aspecto no contemplado o no hay coincidencia exacta con los criterios del grupo, DEBES DEVOLVER una lista vacía de criterios para ese apartado: "criterios": [].
+3. IDENTIFICADOR DE ACTIVIDADES:
+   - "numero": el identificador o número del apartado (ej. "1", "2.a", "3.1"). Conserva la numeración original si proviene de un archivo o fotografía.
+   - Si se diseña desde una petición o prompt de texto, enumera secuencialmente ("1", "2", "3"...).
+4. "titulo": enunciado claro y descriptivo del aspecto, ejercicio o competencia evaluada en ese apartado.
+5. "peso": peso porcentual (1 a 100) o null.
+6. "descriptores": objeto con exactamente 4 niveles numéricos '1', '2', '3', '4':
+   "1": Insuficiente / Inicial (1-4 pts)
+   "2": En proceso / Suficiente (5-6 pts)
+   "3": Conseguido / Notable (7-8 pts)
+   "4": Avanzado / Sobresaliente (9-10 pts)
+7. "tipo": sugiere el tipo de instrumento evaluativo ("ACTIVIDAD", "TRABAJO" o "EXAMEN").
+8. "titulo": título descriptivo sugerido para la rúbrica.${instruccionesAdicionales}`;
+
+        const parts: any[] = [];
+
+        if (modoEspecifico) {
+          parts.push({
+            text: promptInstrucciones + '\n\nDevuelve el JSON estructurado con exactamente este apartado y los criterios oficiales del grupo asociados.',
+          });
+        } else if (origen === 'foto' || (imagenBase64 && mimeType?.startsWith('image/'))) {
+          let cleanBase64 = String(imagenBase64).trim();
+          if (cleanBase64.includes(',')) {
+            cleanBase64 = cleanBase64.split(',')[1];
+          }
+          parts.push({
+            inlineData: {
+              data: cleanBase64,
+              mimeType: mimeType || 'image/jpeg',
+            },
+          });
+          parts.push({
+            text: promptInstrucciones + '\n\nAnaliza la fotografía o imagen adjunta y devuelve el JSON estructurado con la rúbrica normalizada y los criterios oficiales asociados.',
+          });
+        } else if (pdfBase64 || (imagenBase64 && mimeType === 'application/pdf')) {
+          let cleanBase64 = String(pdfBase64 || imagenBase64).trim();
+          if (cleanBase64.includes(',')) {
+            cleanBase64 = cleanBase64.split(',')[1];
+          }
+          parts.push({
+            inlineData: {
+              data: cleanBase64,
+              mimeType: 'application/pdf',
+            },
+          });
+          parts.push({
+            text: promptInstrucciones + '\n\nAnaliza el documento PDF adjunto y devuelve el JSON estructurado con la rúbrica normalizada y los criterios oficiales asociados.',
+          });
+        } else if (documentoTexto) {
+          parts.push({
+            text: promptInstrucciones + `\n\nCONTENIDO EXTRAÍDO DEL DOCUMENTO:\n${documentoTexto}\n\nDevuelve el JSON estructurado con la rúbrica normalizada y los criterios oficiales asociados.`,
+          });
+        } else if (promptTexto) {
+          parts.push({
+            text: promptInstrucciones + `\n\nPLANTEAMIENTO DEL PROFESOR / DESCRIPCIÓN DE LA RÚBRICA DESEADA:\n${promptTexto}\n\nDiseña y devuelve el JSON estructurado con una propuesta completa de rúbrica, indicadores, descriptores y criterios oficiales adecuados a esta propuesta.`,
+          });
+        } else {
+          return new Response(
+            JSON.stringify({ error: "No se ha proporcionado material o prompt para diseñar la rúbrica con Gemini." }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const responseSchema = {
+          type: "OBJECT",
+          properties: {
+            titulo: { type: "STRING" },
+            tipo: { type: "STRING", enum: ["ACTIVIDAD", "TRABAJO", "EXAMEN"] },
+            descripcion: { type: "STRING" },
+            items: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  numero: { type: "STRING" },
+                  titulo: { type: "STRING" },
+                  peso: { type: "NUMBER" },
+                  criterios: {
+                    type: "ARRAY",
+                    items: { type: "STRING" },
+                  },
+                  descriptores: {
+                    type: "OBJECT",
+                    properties: {
+                      "1": { type: "STRING" },
+                      "2": { type: "STRING" },
+                      "3": { type: "STRING" },
+                      "4": { type: "STRING" },
+                    },
+                    required: ["1", "2", "3", "4"],
+                  },
+                },
+                required: ["titulo", "criterios", "descriptores"],
+              },
+            },
+          },
+          required: ["titulo", "tipo", "items"],
+        };
+
+        const modelosAProbar = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+        let rawTextResponse: string | null = null;
+        let lastStatus: number | null = null;
+        let lastErrMessage: string = "No se obtuvo respuesta de Gemini.";
+
+        for (const modelo of modelosAProbar) {
+          try {
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${geminiApiKey}`;
+            const gResponse = await fetch(geminiUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "User-Agent": "aistudio-build",
+              },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts }],
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: "application/json",
+                  responseSchema,
+                },
+              }),
+            });
+
+            if (!gResponse.ok) {
+              lastStatus = gResponse.status;
+              let errText = `HTTP ${gResponse.status}`;
+              try {
+                const errJson = await gResponse.json();
+                if (errJson?.error?.message) {
+                  errText = errJson.error.message;
+                }
+              } catch {
+                // ignorar
+              }
+              lastErrMessage = `Error con modelo ${modelo}: ${errText}`;
+              console.warn(`[EdgeFunction] ${lastErrMessage}`);
+
+              if (gResponse.status === 503 || gResponse.status === 429) {
+                break;
+              }
+              continue;
+            }
+
+            const gData = await gResponse.json();
+            const textCandidate = gData?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (textCandidate) {
+              rawTextResponse = textCandidate;
+              break;
+            }
+          } catch (fetchErr: any) {
+            console.warn(`[EdgeFunction] Excepción con modelo ${modelo}:`, fetchErr?.message || fetchErr);
+            lastErrMessage = fetchErr?.message || "Error al conectar con la API de Gemini.";
+          }
+        }
+
+        if (!rawTextResponse) {
+          if (lastStatus === 503) {
+            return new Response(
+              JSON.stringify({ error: "El servicio de Gemini está experimentando una alta demanda temporal (503). Por favor, reintente en unos momentos." }),
+              { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          if (lastStatus === 429) {
+            return new Response(
+              JSON.stringify({ error: "Se ha superado la cuota de peticiones a Gemini (429). Por favor, espere un momento." }),
+              { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          return new Response(
+            JSON.stringify({ error: `Error al generar la rúbrica con Gemini: ${lastErrMessage}` }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(rawTextResponse);
+        } catch {
+          return new Response(
+            JSON.stringify({ error: "Gemini devolvió una respuesta que no pudo ser procesada como JSON válido." }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Normalizar apartados y filtrar exclusivamente criterios oficiales
+        const codigosOficialesSet = new Set(
+          criteriosGrupo.map((c) => String(c.codigo).trim().toLowerCase())
+        );
+
+        const itemsNormalizados = (parsed.items || []).map((it: any, idx: number) => {
+          const criteriosFiltrados = (it.criterios || []).filter((cod: string) => {
+            if (codigosOficialesSet.size === 0) return false;
+            return codigosOficialesSet.has(String(cod).trim().toLowerCase());
+          });
+
+          return {
+            id: `borrador_${idx}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            numero: it.numero || String(idx + 1),
+            titulo: it.titulo || `Apartado ${idx + 1}`,
+            peso: typeof it.peso === 'number' && !isNaN(it.peso) ? it.peso : null,
+            criterios: criteriosFiltrados,
+            criteriosPendientes: criteriosFiltrados.length === 0,
+            descriptores: it.descriptores || {
+              '1': 'Nivel Inicial / Insuficiente',
+              '2': 'Nivel En proceso / Suficiente',
+              '3': 'Nivel Conseguido / Notable',
+              '4': 'Nivel Avanzado / Sobresaliente',
+            },
+          };
+        });
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            borrador: {
+              titulo: parsed.titulo || 'Nueva Rúbrica Analítica',
+              tipo: parsed.tipo || 'ACTIVIDAD',
+              descripcion: parsed.descripcion || null,
+              items: itemsNormalizados,
+              totalCriteriosDisponibles: criteriosGrupo.length,
+            },
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
@@ -1128,7 +1479,11 @@ serve(async (req: Request) => {
           };
         });
 
-        // 7. Generación de identificadores únicos para la rúbrica y la actividad
+        // 7. Normalización de fecha de creación e identificadores
+        const rawFechaCreacion = typeof body?.fechaCreacion === 'string' && body.fechaCreacion.trim()
+          ? body.fechaCreacion.trim()
+          : (typeof body?.fecha_creacion === 'string' && body.fecha_creacion.trim() ? body.fecha_creacion.trim() : new Date().toISOString());
+
         const rubricaId = crypto.randomUUID().toLowerCase();
         const actividadId = crypto.randomUUID().toLowerCase();
 
@@ -1144,6 +1499,7 @@ serve(async (req: Request) => {
             p_items: itemsFinales,
             p_actividad_id: actividadId,
             p_evaluacion_periodo: periodoFinal,
+            p_fecha_creacion: rawFechaCreacion,
           }
         );
 
@@ -1504,10 +1860,13 @@ REGLAS OBLIGATORIAS:
 
         const rawItems = Array.isArray(body?.items) ? body.items : null;
         const rawTitulo = typeof body?.titulo === 'string' ? body.titulo.trim() : null;
+        const rawFechaInput = typeof body?.fechaCreacion === 'string' && body.fechaCreacion.trim()
+          ? body.fechaCreacion.trim()
+          : (typeof body?.fecha_creacion === 'string' && body.fecha_creacion.trim() ? body.fecha_creacion.trim() : null);
 
-        if (!rawItems && !rawTitulo) {
+        if (!rawItems && !rawTitulo && !rawFechaInput) {
           return new Response(
-            JSON.stringify({ error: "Debe proporcionar 'titulo' o 'items' para actualizar la rúbrica." }),
+            JSON.stringify({ error: "Debe proporcionar 'titulo', 'items' o 'fecha_creacion' para actualizar la rúbrica." }),
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
@@ -1550,6 +1909,10 @@ REGLAS OBLIGATORIAS:
         if (rawItems) {
           updateFields.items = rawItems;
         }
+        if (rawFechaInput) {
+          const cleanFechaDate = rawFechaInput.includes('T') ? rawFechaInput.split('T')[0] : rawFechaInput;
+          updateFields.fecha_creacion = cleanFechaDate;
+        }
 
         // Actualizar la rúbrica en Supabase
         const { data: rubricaActualizada, error: updateError } = await supabase
@@ -1567,6 +1930,26 @@ REGLAS OBLIGATORIAS:
           );
         }
 
+        // Sincronizar título y fecha_creacion en public.actividades si cambiaron
+        const actUpdateFields: Record<string, any> = {};
+        if (rawTitulo) actUpdateFields.nombre = rawTitulo;
+        if (rawFechaInput) {
+          const cleanFechaDate = rawFechaInput.includes('T') ? rawFechaInput.split('T')[0] : rawFechaInput;
+          actUpdateFields.fecha_creacion = cleanFechaDate;
+        }
+
+        if (Object.keys(actUpdateFields).length > 0) {
+          const { error: actUpdateErr } = await supabase
+            .from("actividades")
+            .update(actUpdateFields)
+            .eq("rubrica_id", rubricaId)
+            .eq("grupo_id", grupo.id);
+
+          if (actUpdateErr) {
+            console.warn("[fernanditio-data] Advertencia al sincronizar actividad vinculada:", actUpdateErr);
+          }
+        }
+
         // Sincronizar cuadernos_sync si existe
         try {
           const { data: syncRow } = await supabase
@@ -1580,15 +1963,32 @@ REGLAS OBLIGATORIAS:
             if (typeof p === "string") {
               try { p = JSON.parse(p); } catch {}
             }
-            if (p && typeof p === "object" && Array.isArray(p.rubricas)) {
+            if (p && typeof p === "object") {
               let syncModificado = false;
-              p.rubricas = p.rubricas.map((r: any) => {
-                if (r.id === rubricaId) {
-                  syncModificado = true;
-                  return { ...r, ...updateFields };
-                }
-                return r;
-              });
+              if (Array.isArray(p.rubricas)) {
+                p.rubricas = p.rubricas.map((r: any) => {
+                  if (r.id === rubricaId) {
+                    syncModificado = true;
+                    return { ...r, ...updateFields };
+                  }
+                  return r;
+                });
+              }
+              if (Object.keys(actUpdateFields).length > 0 && Array.isArray(p.actividades)) {
+                p.actividades = p.actividades.map((a: any) => {
+                  if (a.rubrica_id === rubricaId) {
+                    syncModificado = true;
+                    const updatedAct = { ...a };
+                    if (rawTitulo) updatedAct.nombre = rawTitulo;
+                    if (rawFechaInput) {
+                      const cleanFechaDate = rawFechaInput.includes('T') ? rawFechaInput.split('T')[0] : rawFechaInput;
+                      updatedAct.fecha_creacion = cleanFechaDate;
+                    }
+                    return updatedAct;
+                  }
+                  return a;
+                });
+              }
               if (syncModificado) {
                 await supabase
                   .from("cuadernos_sync")
@@ -2360,27 +2760,6 @@ REGLAS OBLIGATORIAS:
         );
       }
 
-      // 7.3. Verificación estricta de propiedad: el grupo DEBE pertenecer al profesor resuelto
-      const { data: grupo, error: grupoError } = await supabase
-        .from("grupos")
-        .select("id, profesor_id")
-        .eq("id", targetGrupoId)
-        .eq("profesor_id", profesor.id)
-        .maybeSingle();
-
-      if (grupoError) {
-        return new Response(
-          JSON.stringify({ error: "Error al verificar la propiedad del grupo." }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      if (!grupo) {
-        return new Response(
-          JSON.stringify({ error: "Grupo no encontrado o no pertenece al docente autenticado." }),
-          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
 
       // 7.4. Verificación de pertenencia de alumnos y actividades al grupo
       const allAlumnoIds = Array.from(new Set([
@@ -2736,12 +3115,12 @@ REGLAS OBLIGATORIAS:
           .order("nombre", { ascending: true }),
         supabase
           .from("rubricas")
-          .select("id, grupo_id, titulo, tipo, descripcion, items")
+          .select("id, grupo_id, titulo, tipo, descripcion, items, fecha_creacion")
           .eq("grupo_id", grupo.id)
           .order("titulo", { ascending: true }),
         supabase
           .from("actividades")
-          .select("id, grupo_id, evaluacion_periodo, nombre, tipo, seccion_id, metodo, rubrica_id")
+          .select("id, grupo_id, evaluacion_periodo, nombre, tipo, seccion_id, metodo, rubrica_id, fecha_creacion")
           .eq("grupo_id", grupo.id)
           .order("nombre", { ascending: true }),
         supabase
@@ -2770,6 +3149,7 @@ REGLAS OBLIGATORIAS:
         titulo?: string;
         tipo?: string;
         descripcion?: string | null;
+        fecha_creacion?: string | null;
         items?: unknown;
       }
 

@@ -93,6 +93,7 @@ export interface NormalizedRubrica {
   created_at?: string;
   updated_at?: string;
   fecha?: string | null;
+  fecha_creacion?: string | null;
   raw: Rubrica;
 }
 
@@ -474,6 +475,7 @@ export function normalizeRubrica(rubrica: Rubrica): NormalizedRubrica {
     created_at: rubrica.created_at,
     updated_at: rubrica.updated_at,
     fecha: rubrica.fecha,
+    fecha_creacion: rubrica.fecha_creacion,
     raw: rubrica,
   };
 }
